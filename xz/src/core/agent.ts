@@ -50,6 +50,28 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: 'edit_file',
+    description: 'Edit an existing file by replacing one exact text block with new text',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'File path to edit (relative to current working directory or absolute path)',
+        },
+        oldText: {
+          type: 'string',
+          description: 'Exact text to replace (must appear exactly once)',
+        },
+        newText: {
+          type: 'string',
+          description: 'Replacement text',
+        },
+      },
+      required: ['path', 'oldText', 'newText'],
+    },
+  },
+  {
     name: 'schedule_task',
     description: 'Schedule a task for future execution',
     parameters: {
@@ -103,6 +125,10 @@ export interface AgentOptions {
   sessionId?: string;
   onMessage?: (message: Message) => void;
   onToolCall?: (name: string, args: unknown) => void;
+  onAssistantStreamStart?: () => void;
+  onAssistantStreamDelta?: (delta: string) => void;
+  onAssistantReasoningDelta?: (delta: string) => void;
+  onAssistantStreamEnd?: () => void;
 }
 
 export class Agent {
@@ -111,6 +137,10 @@ export class Agent {
   private config: ReturnType<typeof loadConfig>;
   private onMessage?: (message: Message) => void;
   private onToolCall?: (name: string, args: unknown) => void;
+  private onAssistantStreamStart?: () => void;
+  private onAssistantStreamDelta?: (delta: string) => void;
+  private onAssistantReasoningDelta?: (delta: string) => void;
+  private onAssistantStreamEnd?: () => void;
   private systemPrompt: string | null = null;
 
   constructor(options: AgentOptions = {}) {
@@ -118,6 +148,10 @@ export class Agent {
     this.llm = createLLMClient(this.config);
     this.onMessage = options.onMessage;
     this.onToolCall = options.onToolCall;
+    this.onAssistantStreamStart = options.onAssistantStreamStart;
+    this.onAssistantStreamDelta = options.onAssistantStreamDelta;
+    this.onAssistantReasoningDelta = options.onAssistantReasoningDelta;
+    this.onAssistantStreamEnd = options.onAssistantStreamEnd;
 
     // Create or resume session
     if (options.sessionId) {
@@ -162,23 +196,7 @@ export class Agent {
       ...history,
     ];
 
-    // Get response from LLM
-    let response: LLMResponse;
-    try {
-      response = await this.llm.chat(messages, { tools: TOOLS });
-    } catch (error) {
-      console.error('LLM error:', error);
-      this.saveMessage('assistant', 'Sorry, I encountered an error processing your request.');
-      return;
-    }
-
-    // Handle tool calls
-    if (response.toolCalls && response.toolCalls.length > 0) {
-      await this.handleToolCalls(response.toolCalls, messages);
-    } else if (response.content) {
-      // Save assistant response
-      this.saveMessage('assistant', response.content);
-    }
+    await this.runConversationLoop(messages, 'Sorry, I encountered an error processing your request.');
   }
 
   /**
@@ -199,21 +217,38 @@ export class Agent {
       ...history,
     ];
 
-    // Get response
-    let response: LLMResponse;
-    try {
-      response = await this.llm.chat(messages, { tools: TOOLS });
-    } catch (error) {
-      console.error('LLM error:', error);
-      this.saveMessage('assistant', 'Failed to process scheduled task.');
-      return;
-    }
+    await this.runConversationLoop(messages, 'Failed to process scheduled task.');
+  }
 
-    // Handle response
-    if (response.toolCalls && response.toolCalls.length > 0) {
-      await this.handleToolCalls(response.toolCalls, messages);
-    } else if (response.content) {
-      this.saveMessage('assistant', response.content);
+  /**
+   * Main agent loop: assistant turn -> tool execution -> next assistant turn.
+   * Continues until the assistant returns a final response without tool calls.
+   */
+  private async runConversationLoop(messages: Message[], errorReply: string): Promise<void> {
+    while (true) {
+      let response: LLMResponse;
+      try {
+        response = await this.chatWithStreaming(messages, { tools: TOOLS });
+      } catch (error) {
+        console.error('LLM error:', error);
+        this.saveMessage('assistant', errorReply);
+        return;
+      }
+
+      if (response.toolCalls && response.toolCalls.length > 0) {
+        await this.handleToolCalls(
+          response.toolCalls,
+          messages,
+          response.content,
+          response.reasoningContent ?? null
+        );
+        continue;
+      }
+
+      if (response.content) {
+        this.saveMessage('assistant', response.content);
+      }
+      return;
     }
   }
 
@@ -222,11 +257,29 @@ export class Agent {
    */
   private async handleToolCalls(
     toolCalls: NonNullable<LLMResponse['toolCalls']>,
-    messages: Message[]
+    messages: Message[],
+    assistantContent: string | null = null,
+    assistantReasoningContent: string | null = null
   ): Promise<void> {
+    // OpenAI-compatible APIs require the assistant tool call message to appear
+    // immediately before the corresponding tool response messages.
+    // Kimi thinking mode also expects reasoning_content on assistant tool-call messages.
+    messages.push({
+      role: 'assistant',
+      content: assistantContent ?? '',
+      tool_calls: toolCalls,
+      reasoning_content: assistantReasoningContent ?? '',
+    });
+
     for (const toolCall of toolCalls) {
       const { name, arguments: argsStr } = toolCall.function;
-      const args = JSON.parse(argsStr);
+
+      let args: Record<string, unknown>;
+      try {
+        args = JSON.parse(argsStr) as Record<string, unknown>;
+      } catch {
+        args = {};
+      }
 
       this.onToolCall?.(name, args);
 
@@ -234,16 +287,27 @@ export class Agent {
 
       switch (name) {
         case 'bash':
-          result = await this.executeBash(args.command, args.timeout);
+          result = await this.executeBash(String(args.command ?? ''), Number(args.timeout ?? 60));
           break;
         case 'memory_search':
-          result = await this.executeMemorySearch(args.query, args.limit);
+          result = await this.executeMemorySearch(String(args.query ?? ''), Number(args.limit ?? 5));
+          break;
+        case 'edit_file':
+          result = await this.executeEditFile(
+            String(args.path ?? ''),
+            String(args.oldText ?? args.old_text ?? ''),
+            String(args.newText ?? args.new_text ?? '')
+          );
           break;
         case 'schedule_task':
-          result = await this.executeScheduleTask(args.description, args.when, args.recurring);
+          result = await this.executeScheduleTask(
+            String(args.description ?? ''),
+            String(args.when ?? ''),
+            String(args.recurring ?? 'none')
+          );
           break;
         case 'update_config':
-          result = await this.executeUpdateConfig(args.path, args.value);
+          result = await this.executeUpdateConfig(String(args.path ?? ''), args.value);
           break;
         default:
           result = `Unknown tool: ${name}`;
@@ -256,12 +320,34 @@ export class Agent {
         tool_call_id: toolCall.id,
       });
     }
+  }
 
-    // Get final response after tool calls
-    const finalResponse = await this.llm.chat(messages, { tools: TOOLS });
-    
-    if (finalResponse.content) {
-      this.saveMessage('assistant', finalResponse.content);
+  private async chatWithStreaming(messages: Message[], options: { tools: Tool[] }): Promise<LLMResponse> {
+    let streamStarted = false;
+
+    try {
+      const response = await this.llm.chatStream(messages, options, {
+        onContent: (delta) => {
+          if (!streamStarted) {
+            streamStarted = true;
+            this.onAssistantStreamStart?.();
+          }
+          this.onAssistantStreamDelta?.(delta);
+        },
+        onReasoning: (delta) => {
+          if (!streamStarted) {
+            streamStarted = true;
+            this.onAssistantStreamStart?.();
+          }
+          this.onAssistantReasoningDelta?.(delta);
+        },
+      });
+
+      return response;
+    } finally {
+      if (streamStarted) {
+        this.onAssistantStreamEnd?.();
+      }
     }
   }
 
@@ -295,6 +381,51 @@ export class Agent {
     return results.items
       .map((r, i) => `${i + 1}. ${r.chunk.file}:${r.chunk.lineStart}-${r.chunk.lineEnd}: ${r.chunk.content.slice(0, 100)}`)
       .join('\n');
+  }
+
+  /**
+   * Edit file by exact single replacement
+   */
+  private async executeEditFile(path: string, oldText: string, newText: string): Promise<string> {
+    if (!path) {
+      return 'Error: "path" is required';
+    }
+    if (!oldText) {
+      return 'Error: "oldText" is required';
+    }
+
+    const { isAbsolute, resolve } = await import('path');
+    const { readFile, writeFile } = await import('fs/promises');
+
+    const targetPath = isAbsolute(path) ? path : resolve(process.cwd(), path);
+
+    let content: string;
+    try {
+      content = await readFile(targetPath, 'utf-8');
+    } catch (error) {
+      return `Error reading file ${path}: ${error instanceof Error ? error.message : String(error)}`;
+    }
+
+    const matches = content.split(oldText).length - 1;
+    if (matches === 0) {
+      return `Error: oldText not found in ${path}. The text must match exactly.`;
+    }
+    if (matches > 1) {
+      return `Error: oldText appears ${matches} times in ${path}. Provide a more specific block.`;
+    }
+
+    const updated = content.replace(oldText, newText);
+    if (updated === content) {
+      return `No change applied to ${path}.`;
+    }
+
+    try {
+      await writeFile(targetPath, updated, 'utf-8');
+    } catch (error) {
+      return `Error writing file ${path}: ${error instanceof Error ? error.message : String(error)}`;
+    }
+
+    return `Edited ${path}: replaced ${oldText.length} chars with ${newText.length} chars.`;
   }
 
   /**

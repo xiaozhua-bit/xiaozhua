@@ -39,9 +39,10 @@ export async function buildSystemPrompt(context: PromptContext = {}): Promise<st
 You have access to the following tools via function calling:
 
 - **bash**: Execute bash commands
-- **memory_search**: Search knowledge memory  
-- **history_search**: Search chat history
+- **memory_search**: Search knowledge memory
+- **edit_file**: Edit files with exact text replacement
 - **schedule_task**: Schedule future tasks
+- **update_config**: Update agent configuration
 
 You also have access to the xz CLI for retrieval:
 - xz memory search <query> [--page N]

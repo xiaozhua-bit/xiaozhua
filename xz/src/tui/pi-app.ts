@@ -4,6 +4,7 @@
 
 import React, { createElement as h, useEffect, useState } from 'react';
 import { Box, Text, render, useApp, useInput, type Key } from 'ink';
+import TextInput from 'ink-text-input';
 import { Agent, createAgent } from '../core/agent.js';
 import { InitAgent, createInitAgent } from '../core/init-agent.js';
 import { getSchedulerTicker, stopSchedulerTicker } from '../scheduler/index.js';
@@ -41,6 +42,8 @@ interface AppSnapshot {
   messages: ChatMessage[];
   inputValue: string;
   isProcessing: boolean;
+  streamActive: boolean;
+  thinkingPreview: string;
 }
 
 interface CommandOption {
@@ -111,6 +114,10 @@ export class PiTUIApp {
   private inputValue = '';
   private isProcessing = false;
   private stopped = false;
+  private streamActive = false;
+  private thinkingPreview = '';
+  private streamingAssistantMessage: ChatMessage | null = null;
+  private awaitingFinalAssistantMessage = false;
 
   private exitHandler: (() => void) | null = null;
   private listeners = new Set<() => void>();
@@ -132,6 +139,10 @@ export class PiTUIApp {
         sessionId: recentSession?.id,
         onMessage: (msg) => this.handleAgentMessage(msg),
         onToolCall: (name, args) => this.handleToolCall(name, args),
+        onAssistantStreamStart: () => this.handleAssistantStreamStart(),
+        onAssistantStreamDelta: (delta) => this.handleAssistantStreamDelta(delta),
+        onAssistantReasoningDelta: (delta) => this.handleAssistantReasoningDelta(delta),
+        onAssistantStreamEnd: () => this.handleAssistantStreamEnd(),
       });
 
       this.setupScheduler();
@@ -195,6 +206,8 @@ export class PiTUIApp {
       messages: this.messages,
       inputValue: this.inputValue,
       isProcessing: this.isProcessing,
+      streamActive: this.streamActive,
+      thinkingPreview: this.thinkingPreview,
     };
   }
 
@@ -202,7 +215,12 @@ export class PiTUIApp {
     const maxTokens = Math.max(this.config.context.maxTokens, 1);
     const windowMessages = this.messages.slice(-PiTUIApp.CONTEXT_WINDOW_MESSAGES);
     const usedTokens = windowMessages.reduce((sum, msg) => sum + this.estimateTokens(msg.content), 0);
-    const leftPercent = Math.max(0, Math.min(100, Math.round((1 - usedTokens / maxTokens) * 100)));
+    const tokenLeftRatio = Math.max(0, Math.min(1, 1 - usedTokens / maxTokens));
+    const messageLeftRatio = Math.max(
+      0,
+      Math.min(1, 1 - windowMessages.length / PiTUIApp.CONTEXT_WINDOW_MESSAGES),
+    );
+    const leftPercent = Math.max(0, Math.min(100, Math.round(Math.min(tokenLeftRatio, messageLeftRatio) * 100)));
 
     return { usedTokens, maxTokens, leftPercent };
   }
@@ -233,30 +251,6 @@ export class PiTUIApp {
 
   setInputValue(raw: string): void {
     this.inputValue = this.normalizeInput(raw);
-    this.emit();
-  }
-
-  backspaceInput(): void {
-    if (!this.inputValue) {
-      return;
-    }
-
-    this.inputValue = this.inputValue.slice(0, -1);
-    this.emit();
-  }
-
-  appendInput(raw: string): void {
-    if (!raw || this.stopped) {
-      return;
-    }
-
-    const normalized = this.normalizeInput(raw);
-
-    if (!normalized) {
-      return;
-    }
-
-    this.inputValue += normalized;
     this.emit();
   }
 
@@ -316,7 +310,8 @@ export class PiTUIApp {
         return;
       }
 
-      this.addMessage('user', trimmed);
+      this.thinkingPreview = '';
+      this.streamActive = false;
       this.isProcessing = true;
       this.emit();
 
@@ -349,7 +344,10 @@ export class PiTUIApp {
       return;
     }
 
-    this.addMessage('user', trimmed);
+    this.thinkingPreview = '';
+    this.streamActive = false;
+    this.streamingAssistantMessage = null;
+    this.awaitingFinalAssistantMessage = false;
 
     this.isProcessing = true;
     this.setBusy(true);
@@ -363,10 +361,35 @@ export class PiTUIApp {
 
     this.isProcessing = false;
     this.setBusy(false);
+    this.streamActive = false;
+    this.thinkingPreview = '';
+    this.streamingAssistantMessage = null;
+    this.awaitingFinalAssistantMessage = false;
     this.emit();
   }
 
   private handleAgentMessage(msg: { role: string; content: string }): void {
+    if (msg.role === 'assistant' && this.streamingAssistantMessage) {
+      this.streamingAssistantMessage.content = msg.content;
+      this.awaitingFinalAssistantMessage = false;
+      this.streamingAssistantMessage = null;
+      this.thinkingPreview = '';
+      this.emit();
+      return;
+    }
+
+    if (msg.role === 'assistant' && this.awaitingFinalAssistantMessage) {
+      this.awaitingFinalAssistantMessage = false;
+      this.thinkingPreview = '';
+    }
+
+    if (msg.role === 'user') {
+      const last = this.messages[this.messages.length - 1];
+      if (last && last.role === 'user' && last.content === msg.content) {
+        return;
+      }
+    }
+
     this.addMessage(msg.role, msg.content);
   }
 
@@ -388,6 +411,52 @@ export class PiTUIApp {
     this.emit();
   }
 
+  private handleAssistantStreamStart(): void {
+    this.streamActive = true;
+    this.awaitingFinalAssistantMessage = false;
+    this.emit();
+  }
+
+  private handleAssistantStreamDelta(delta: string): void {
+    if (!delta) {
+      return;
+    }
+
+    if (!this.streamingAssistantMessage) {
+      this.streamingAssistantMessage = {
+        role: 'assistant',
+        content: '',
+        timestamp: Date.now(),
+      };
+      this.messages.push(this.streamingAssistantMessage);
+
+      if (this.messages.length > 400) {
+        this.messages = this.messages.slice(-400);
+      }
+    }
+
+    this.streamingAssistantMessage.content += delta;
+    this.emit();
+  }
+
+  private handleAssistantReasoningDelta(delta: string): void {
+    if (!delta) {
+      return;
+    }
+
+    this.thinkingPreview += delta;
+    if (this.thinkingPreview.length > 240) {
+      this.thinkingPreview = this.thinkingPreview.slice(-240);
+    }
+    this.emit();
+  }
+
+  private handleAssistantStreamEnd(): void {
+    this.streamActive = false;
+    this.awaitingFinalAssistantMessage = true;
+    this.emit();
+  }
+
   private async handleCommand(input: string): Promise<void> {
     const parts = input.slice(1).split(' ');
     const cmd = parts[0];
@@ -398,8 +467,16 @@ export class PiTUIApp {
         this.agent = createAgent({
           onMessage: (msg) => this.handleAgentMessage(msg),
           onToolCall: (name, toolArgs) => this.handleToolCall(name, toolArgs),
+          onAssistantStreamStart: () => this.handleAssistantStreamStart(),
+          onAssistantStreamDelta: (delta) => this.handleAssistantStreamDelta(delta),
+          onAssistantReasoningDelta: (delta) => this.handleAssistantReasoningDelta(delta),
+          onAssistantStreamEnd: () => this.handleAssistantStreamEnd(),
         });
         this.messages = [];
+        this.streamActive = false;
+        this.thinkingPreview = '';
+        this.streamingAssistantMessage = null;
+        this.awaitingFinalAssistantMessage = false;
         this.addMessage('system', `New session: ${this.agent.getSessionId().slice(0, 16)}...`);
         break;
 
@@ -574,11 +651,19 @@ export class PiTUIApp {
     setTimeout(() => {
       this.mode = 'normal';
       this.initAgent = null;
+      this.streamActive = false;
+      this.thinkingPreview = '';
+      this.streamingAssistantMessage = null;
+      this.awaitingFinalAssistantMessage = false;
 
       // Create normal agent
       this.agent = createAgent({
         onMessage: (msg) => this.handleAgentMessage(msg),
         onToolCall: (name, args) => this.handleToolCall(name, args),
+        onAssistantStreamStart: () => this.handleAssistantStreamStart(),
+        onAssistantStreamDelta: (delta) => this.handleAssistantStreamDelta(delta),
+        onAssistantReasoningDelta: (delta) => this.handleAssistantReasoningDelta(delta),
+        onAssistantStreamEnd: () => this.handleAssistantStreamEnd(),
       });
 
       this.setupScheduler();
@@ -652,10 +737,25 @@ function renderMessage(message: ChatMessage, index: number): React.ReactElement 
   );
 }
 
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+function getThinkingSnippet(content: string, maxLength = 72): string {
+  const normalized = content.replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return '';
+  }
+
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `…${normalized.slice(-maxLength)}`;
+}
+
 function InkTUIRoot({ app }: InkTUIRootProps): React.ReactElement {
   const { exit } = useApp();
   const [snapshot, setSnapshot] = useState<AppSnapshot>(() => app.getSnapshot());
-  const [, setTicker] = useState(0);
+  const [ticker, setTicker] = useState(0);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
 
   const completionState = getCommandCompletionState(snapshot.inputValue);
@@ -708,18 +808,8 @@ function InkTUIRoot({ app }: InkTUIRootProps): React.ReactElement {
       return;
     }
 
-    if (key.return) {
-      void app.submitInput();
-      return;
-    }
-
     if (key.escape) {
       app.clearInput();
-      return;
-    }
-
-    if (key.backspace || key.delete) {
-      app.backspaceInput();
       return;
     }
 
@@ -739,11 +829,9 @@ function InkTUIRoot({ app }: InkTUIRootProps): React.ReactElement {
       return;
     }
 
-    if (key.tab || key.upArrow || key.downArrow || key.leftArrow || key.rightArrow) {
+    if (key.tab || key.upArrow || key.downArrow) {
       return;
     }
-
-    app.appendInput(input);
   });
 
   const visibleMessages = snapshot.messages.slice(-80);
@@ -777,7 +865,8 @@ function InkTUIRoot({ app }: InkTUIRootProps): React.ReactElement {
     heartbeatProps.dimColor = false;
   }
 
-  const inputHint = completionState.isCommandMode ? 'Tab 补全 · ↑↓ 选择 · Enter 执行' : '/ 可以用命令';
+  const spinner = SPINNER_FRAMES[ticker % SPINNER_FRAMES.length];
+  const thinkingSnippet = getThinkingSnippet(snapshot.thinkingPreview);
 
   return h(
     Box,
@@ -840,13 +929,17 @@ function InkTUIRoot({ app }: InkTUIRootProps): React.ReactElement {
             ]
           : visibleMessages.map((message, index) => renderMessage(message, index))),
       ),
-      h(
-        Box,
-        {
-          justifyContent: 'flex-end',
-        },
-        h(Text, contextProps, `${contextUsage.leftPercent}% left`),
-      ),
+      snapshot.isProcessing &&
+        h(
+          Text,
+          {
+            color: 'yellow',
+          },
+          `${spinner} xz 正在思考${snapshot.streamActive ? ' · 输出中' : '…'}`,
+        ),
+      snapshot.isProcessing &&
+        thinkingSnippet &&
+        h(Text, { dimColor: true }, `思考片段: ${thinkingSnippet}`),
     ),
     h(
       Box,
@@ -858,13 +951,22 @@ function InkTUIRoot({ app }: InkTUIRootProps): React.ReactElement {
         flexDirection: 'column',
       },
       h(
-        Text,
-        null,
-        h(Text, { color: snapshot.isProcessing ? 'yellow' : 'cyan', bold: true }, '>'),
-        ` ${snapshot.inputValue}`,
-        !snapshot.isProcessing && h(Text, { dimColor: true }, '|'),
+        Box,
+        {
+          flexDirection: 'row',
+        },
+        h(Text, { color: snapshot.isProcessing ? 'yellow' : 'cyan', bold: true }, '> '),
+        h(TextInput, {
+          value: snapshot.inputValue,
+          onChange: (value: string) => app.setInputValue(value),
+          onSubmit: () => {
+            void app.submitInput();
+          },
+          showCursor: !snapshot.isProcessing,
+          focus: !snapshot.isProcessing,
+        }),
       ),
-      h(Text, { dimColor: true }, inputHint),
+      h(Text, contextProps, `context ${contextUsage.leftPercent}% left`),
       completionState.isCommandMode &&
         (commandSuggestions.length === 0
           ? h(Text, { color: 'yellow' }, `没有匹配命令: /${completionState.query}`)
