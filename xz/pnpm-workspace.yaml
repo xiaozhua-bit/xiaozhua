@@ -1,0 +1,16 @@
+packages:
+  - .
+
+onlyBuiltDependencies:
+  - '-'
+  - '3'
+  - b
+  - better-sqlite3
+  - e
+  - esbuild
+  - i
+  - l
+  - q
+  - r
+  - s
+  - t

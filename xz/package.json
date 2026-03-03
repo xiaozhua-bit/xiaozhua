@@ -1,0 +1,44 @@
+{
+  "name": "xz",
+  "version": "0.1.0",
+  "description": "AI Agent CLI with retrieval-based memory and SOUL.md identity",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "xz": "./bin/xz.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node ./bin/xz.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "cli": "jiti src/cli/run.ts",
+    "cli:tui": "jiti src/cli/run.ts",
+    "cli:memory": "jiti src/cli/run.ts memory",
+    "cli:history": "jiti src/cli/run.ts history",
+    "cli:debug": "DEBUG=xz jiti src/cli/run.ts"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.0.1",
+    "@iarna/toml": "^2.2.5",
+    "@mariozechner/pi-tui": "^0.55.4",
+    "@opentui/core": "^0.1.86",
+    "better-sqlite3": "^12.6.2",
+    "commander": "^12.1.0",
+    "ink": "^6.8.0",
+    "picocolors": "^1.1.1",
+    "react": "^19.2.4"
+  },
+  "devDependencies": {
+    "@mariozechner/jiti": "^2.6.5",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
