@@ -14,6 +14,7 @@ export interface ModelConfig {
 export interface AuthConfig {
   type: AuthType;
   oauthCredentialsPath?: string;
+  oauthClientId?: string;
   apiKey?: string;
 }
 
@@ -93,6 +94,7 @@ export const DEFAULT_CONFIG: XZConfig = {
   auth: {
     type: 'oauth',
     oauthCredentialsPath: '~/.kimi/credentials/kimi-code.json',
+    oauthClientId: '',
   },
   context: {
     maxTokens: 262144,

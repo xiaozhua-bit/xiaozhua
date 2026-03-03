@@ -172,6 +172,7 @@ export function createConfigFromProvider(
       config.auth = {
         type: 'oauth',
         oauthCredentialsPath: '~/.kimi/credentials/kimi-code.json',
+        oauthClientId: '',
       };
       break;
 

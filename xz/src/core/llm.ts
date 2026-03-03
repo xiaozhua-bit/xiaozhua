@@ -4,7 +4,7 @@
  */
 
 import type { XZConfig } from '../config/types.js';
-import { loadKimiCredentials } from '../config/kimi.js';
+import { ensureFreshKimiCredentials, loadKimiCredentials } from '../config/kimi.js';
 
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -58,12 +58,10 @@ export interface LLMStreamHandlers {
 export class LLMClient {
   private config: XZConfig;
   private baseUrl: string;
-  private headers: Record<string, string>;
 
   constructor(config: XZConfig) {
     this.config = config;
     this.baseUrl = config.model.baseUrl;
-    this.headers = this.buildHeaders();
   }
 
   /**
@@ -75,9 +73,10 @@ export class LLMClient {
   ): Promise<LLMResponse> {
     const url = `${this.baseUrl}/chat/completions`;
     const body = this.buildRequestBody(messages, options);
+    const headers = await this.buildHeaders();
     const response = await fetch(url, {
       method: 'POST',
-      headers: this.headers,
+      headers,
       body: JSON.stringify(body),
     });
 
@@ -113,6 +112,7 @@ export class LLMClient {
     handlers: LLMStreamHandlers = {}
   ): Promise<LLMResponse> {
     const url = `${this.baseUrl}/chat/completions`;
+    const headers = await this.buildHeaders();
     const body: Record<string, unknown> = {
       ...this.buildRequestBody(messages, options),
       stream: true,
@@ -123,7 +123,7 @@ export class LLMClient {
 
     const response = await fetch(url, {
       method: 'POST',
-      headers: this.headers,
+      headers,
       body: JSON.stringify(body),
     });
 
@@ -327,7 +327,7 @@ export class LLMClient {
   /**
    * Build request headers based on auth type
    */
-  private buildHeaders(): Record<string, string> {
+  private async buildHeaders(): Promise<Record<string, string>> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
@@ -338,10 +338,11 @@ export class LLMClient {
     }
 
     if (this.config.auth.type === 'oauth') {
-      // Try to load Kimi credentials
-      const creds = loadKimiCredentials();
-      if (creds) {
-        headers['Authorization'] = `Bearer ${creds.access_token}`;
+      const creds = await ensureFreshKimiCredentials(this.config.auth.oauthClientId || '');
+      const fallback = loadKimiCredentials();
+      const token = creds?.access_token || fallback?.access_token;
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
       }
     } else if (this.config.auth.type === 'api_key' && this.config.auth.apiKey) {
       headers['Authorization'] = `Bearer ${this.config.auth.apiKey}`;
