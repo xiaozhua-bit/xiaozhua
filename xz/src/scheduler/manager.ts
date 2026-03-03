@@ -88,14 +88,27 @@ export function getDueTasks(now: number = Date.now()): ScheduledTask[] {
     SELECT * FROM scheduled_tasks
     WHERE is_enabled = 1
       AND (
-        (execute_at IS NOT NULL AND execute_at <= ?)
+        (
+          is_recurring = 0
+          AND execute_at IS NOT NULL
+          AND execute_at <= ?
+          AND last_executed_at IS NULL
+        )
         OR
-        (is_recurring = 1 AND (
-          last_executed_at IS NULL 
-          OR (last_executed_at + interval_seconds * 1000) <= ?
-        ))
+        (
+          is_recurring = 1
+          AND (execute_at IS NULL OR execute_at <= ?)
+          AND (
+            last_executed_at IS NULL
+            OR (
+              interval_seconds IS NOT NULL
+              AND interval_seconds > 0
+              AND (last_executed_at + interval_seconds * 1000) <= ?
+            )
+          )
+        )
       )
-  `).all(now, now) as TaskRow[];
+  `).all(now, now, now) as TaskRow[];
 
   return rows.map(rowToTask);
 }

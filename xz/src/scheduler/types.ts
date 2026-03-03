@@ -41,4 +41,4 @@ export interface ListTasksOptions {
   enabledOnly?: boolean;
 }
 
-export type TaskCallback = (task: ScheduledTask) => void;
+export type TaskCallback = (task: ScheduledTask) => void | Promise<void>;

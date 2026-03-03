@@ -76,20 +76,24 @@ export class SchedulerTicker {
    * Handle a due task
    */
   private async handleDueTask(task: ScheduledTask): Promise<void> {
-    // Update last executed time
-    updateTaskExecution(task.id, 'success');
+    let status: 'success' | 'failed' = 'success';
+    let output: string | undefined;
 
-    // Disable one-time tasks
-    if (!task.isRecurring) {
-      disableTask(task.id);
-    }
+    // Notify callback first, then persist execution result.
+    try {
+      if (this.onTaskDue) {
+        await this.onTaskDue(task);
+      }
+    } catch (error) {
+      status = 'failed';
+      output = error instanceof Error ? (error.stack || error.message) : String(error);
+      console.error('Task callback error:', error);
+    } finally {
+      updateTaskExecution(task.id, status, output);
 
-    // Notify callback
-    if (this.onTaskDue) {
-      try {
-        this.onTaskDue(task);
-      } catch (error) {
-        console.error('Task callback error:', error);
+      // Disable one-time tasks after the first attempt.
+      if (!task.isRecurring) {
+        disableTask(task.id);
       }
     }
   }

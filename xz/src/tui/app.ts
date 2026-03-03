@@ -526,7 +526,7 @@ ${color.cyan('Context Bar:')}
     const ticker = getSchedulerTicker({
       onTaskDue: (task) => {
         this.printSystemMessage(`⏰ Task: ${task.description}`);
-        this.agent.handleWakeup(task.description);
+        return this.agent.handleWakeup(task.description);
       },
     });
 

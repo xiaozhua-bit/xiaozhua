@@ -594,7 +594,7 @@ export class PiTUIApp {
     const ticker = getSchedulerTicker({
       onTaskDue: (task) => {
         this.addMessage('system', `Task: ${task.description}`);
-        void this.agent?.handleWakeup(task.description);
+        return this.agent?.handleWakeup(task.description);
       },
     });
 
