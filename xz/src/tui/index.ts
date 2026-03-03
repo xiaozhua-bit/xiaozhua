@@ -1,6 +1,6 @@
 /**
  * TUI (Text User Interface) for xz AI Agent
- * Using OpenTUI core renderer
+ * Using Ink renderer
  */
 
 export * from './pi-app.js';
@@ -9,6 +9,7 @@ import { runTUI } from './pi-app.js';
 
 export interface TUIOptions {
   theme?: 'dark' | 'light';
+  mode?: 'normal' | 'init';
 }
 
 /**

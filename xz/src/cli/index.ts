@@ -59,11 +59,11 @@ export async function main(): Promise<void> {
 
   // No args = TUI mode
   if (args.length === 0) {
-    // Check first run
+    // Check first run (config doesn't exist)
     if (isFirstRun()) {
       await runSetupWizard();
     }
-    // Start TUI
+    // Start TUI - it will automatically enter init mode if identity docs don't exist
     await startTUI();
     return;
   }

@@ -5,8 +5,10 @@
 
 import * as p from '@clack/prompts';
 import color from 'picocolors';
+import { writeFileSync } from 'fs';
+import { join } from 'path';
 import { XZConfig, Provider, ProviderOption } from './types.js';
-import { saveConfig, detectAvailableProviders, createConfigFromProvider } from './index.js';
+import { saveConfig, detectAvailableProviders, createConfigFromProvider, ensureXZHome } from './index.js';
 
 const PROVIDER_ICONS: Record<string, string> = {
   kimi: '🌙',
@@ -275,6 +277,307 @@ export async function quickSetup(provider: Provider, apiKey?: string): Promise<v
   
   await delay(300);
   s.stop(`Configured ${provider}`);
+}
+
+/**
+ * Run the identity setup wizard
+ * Guides user to create SOUL.md and USER.md
+ */
+export async function runIdentityWizard(): Promise<void> {
+  p.log.step(color.cyan('Let\'s personalize your AI Agent'));
+  p.log.message(color.dim('This will create your agent\'s identity and profile.\n'));
+
+  // 1. Agent name
+  const agentName = await p.text({
+    message: 'What would you like to name your AI agent?',
+    placeholder: 'e.g., Claude, Kimi, Assistant',
+    validate: (value) => {
+      if (!value || value.trim().length === 0) return 'Please enter a name';
+      if (value.trim().length > 30) return 'Name should be 30 characters or less';
+    },
+  });
+
+  if (p.isCancel(agentName)) {
+    p.cancel('Setup cancelled');
+    process.exit(0);
+  }
+
+  // 2. How to address user
+  const userName = await p.text({
+    message: 'What should I call you?',
+    placeholder: 'e.g., your name or nickname',
+    validate: (value) => {
+      if (!value || value.trim().length === 0) return 'Please enter how you\'d like to be called';
+    },
+  });
+
+  if (p.isCancel(userName)) {
+    p.cancel('Setup cancelled');
+    process.exit(0);
+  }
+
+  // 3. User personality & preferences
+  const userTraits = await p.text({
+    message: 'Tell me about yourself (personality, interests, background)',
+    placeholder: 'e.g., software engineer who loves hiking, detail-oriented, prefers concise answers',
+  });
+
+  if (p.isCancel(userTraits)) {
+    p.cancel('Setup cancelled');
+    process.exit(0);
+  }
+
+  // 4. Communication style
+  const communicationStyle = await p.select({
+    message: 'How do you prefer to communicate?',
+    options: [
+      { value: 'concise', label: 'Concise & Direct', hint: 'Short, to-the-point responses' },
+      { value: 'detailed', label: 'Detailed & Thorough', hint: 'Comprehensive explanations' },
+      { value: 'casual', label: 'Casual & Friendly', hint: 'Relaxed, conversational tone' },
+      { value: 'professional', label: 'Professional', hint: 'Formal, business-like tone' },
+      { value: 'technical', label: 'Technical', hint: 'Precise, technical language' },
+    ],
+    initialValue: 'concise',
+  });
+
+  if (p.isCancel(communicationStyle)) {
+    p.cancel('Setup cancelled');
+    process.exit(0);
+  }
+
+  // 5. Preferred language
+  const preferredLanguage = await p.select({
+    message: 'What language should we primarily use?',
+    options: [
+      { value: 'zh', label: '中文 (Chinese)', hint: '简体中文或繁體中文' },
+      { value: 'en', label: 'English', hint: 'Primary language' },
+      { value: 'auto', label: 'Auto-detect', hint: 'Match your input language' },
+    ],
+    initialValue: 'auto',
+  });
+
+  if (p.isCancel(preferredLanguage)) {
+    p.cancel('Setup cancelled');
+    process.exit(0);
+  }
+
+  // 6. Agent role/personality suggestions
+  const agentRole = await p.text({
+    message: `What role should ${agentName} play?`,
+    placeholder: 'e.g., helpful coding assistant, creative writing partner, thoughtful advisor',
+  });
+
+  if (p.isCancel(agentRole)) {
+    p.cancel('Setup cancelled');
+    process.exit(0);
+  }
+
+  // 7. Additional preferences
+  const additionalPrefs = await p.text({
+    message: 'Any other preferences or things I should know? (optional)',
+    placeholder: 'e.g., prefer code examples in TypeScript, dislike verbose greetings',
+  });
+
+  if (p.isCancel(additionalPrefs)) {
+    p.cancel('Setup cancelled');
+    process.exit(0);
+  }
+
+  // Generate files
+  const s = p.spinner();
+  s.start('Creating your personalized agent...');
+
+  try {
+    const home = ensureXZHome();
+
+    // Generate SOUL.md
+    const soulContent = generateSOUL({
+      name: agentName as string,
+      role: agentRole as string,
+      style: communicationStyle as string,
+      language: preferredLanguage as string,
+    });
+
+    // Generate USER.md
+    const userContent = generateUSER({
+      name: userName as string,
+      traits: userTraits as string,
+      style: communicationStyle as string,
+      language: preferredLanguage as string,
+      additional: additionalPrefs as string | undefined,
+    });
+
+    // Generate MEMORY.md
+    const memoryContent = generateMEMORY();
+
+    // Write files
+    writeFileSync(join(home, 'SOUL.md'), soulContent, 'utf-8');
+    writeFileSync(join(home, 'USER.md'), userContent, 'utf-8');
+    writeFileSync(join(home, 'MEMORY.md'), memoryContent, 'utf-8');
+
+    await delay(500);
+    s.stop('Identity created!');
+
+    p.note(
+      `${color.dim('Agent:')} ${color.cyan(agentName as string)}\n` +
+      `${color.dim('User:')} ${color.cyan(userName as string)}\n` +
+      `${color.dim('Style:')} ${color.dim(communicationStyle as string)}\n` +
+      `${color.dim('Language:')} ${color.dim(preferredLanguage as string)}`,
+      'Profile Summary'
+    );
+
+    p.log.message(color.dim(`\nFiles created in ${home}:`));
+    p.log.message(color.dim('  • SOUL.md - Agent identity'));
+    p.log.message(color.dim('  • USER.md - Your profile'));
+    p.log.message(color.dim('  • MEMORY.md - Knowledge base\n'));
+
+  } catch (error) {
+    s.stop('Failed to create identity files');
+    p.cancel(error instanceof Error ? error.message : 'Unknown error');
+    throw error;
+  }
+}
+
+interface SOULParams {
+  name: string;
+  role: string;
+  style: string;
+  language: string;
+}
+
+interface USERParams {
+  name: string;
+  traits: string;
+  style: string;
+  language: string;
+  additional?: string;
+}
+
+function generateSOUL(params: SOULParams): string {
+  const styleDescriptions: Record<string, string> = {
+    concise: 'clear and concise',
+    detailed: 'thorough and detailed',
+    casual: 'casual and friendly',
+    professional: 'professional and formal',
+    technical: 'precise and technical',
+  };
+
+  const languageNames: Record<string, string> = {
+    zh: 'Chinese (中文)',
+    en: 'English',
+    auto: 'the user\'s input language',
+  };
+
+  return `# SOUL.md
+
+## Identity
+
+You are **${params.name}**, ${params.role}.
+
+## Core Values
+
+- Be helpful, harmless, and honest
+- Respect user privacy and preferences
+- Learn and adapt from interactions
+- Maintain consistency with your defined personality
+
+## Communication Style
+
+- **Style**: ${styleDescriptions[params.style] || params.style}
+- **Language**: Primary language is ${languageNames[params.language] || params.language}
+- **Tone**: Adapt to match the user's communication style while maintaining your core identity
+
+## Guidelines
+
+- Always address the user by their preferred name
+- Remember their preferences and adapt accordingly
+- Be proactive in understanding context
+- When uncertain, ask clarifying questions
+
+## Notes
+
+- This identity was co-created with the user during initial setup
+- Update this file as the relationship evolves
+- The USER.md file contains important information about the user
+`;
+}
+
+function generateUSER(params: USERParams): string {
+  const styleDescriptions: Record<string, string> = {
+    concise: 'Prefers short, direct responses',
+    detailed: 'Appreciates thorough explanations',
+    casual: 'Enjoys relaxed, conversational tone',
+    professional: 'Expects formal, business-like communication',
+    technical: 'Values precise, technical language',
+  };
+
+  const languagePrefs: Record<string, string> = {
+    zh: 'Primary communication in Chinese (中文)',
+    en: 'Primary communication in English',
+    auto: 'Adapt to the language of the conversation',
+  };
+
+  return `# USER.md
+
+## Profile
+
+**Name**: ${params.name}
+
+## About
+
+${params.traits}
+
+## Communication Preferences
+
+- **Style**: ${styleDescriptions[params.style] || params.style}
+- **Language**: ${languagePrefs[params.language] || params.language}
+${params.additional ? `\n## Additional Preferences\n\n${params.additional}` : ''}
+
+## Interaction Notes
+
+- Agent should address user as "${params.name}"
+- Adapt responses based on the communication style preferences above
+- Remember and reference relevant personal details when appropriate
+
+## History
+
+*This section will be updated with important information learned about the user over time.*
+`;
+}
+
+function generateMEMORY(): string {
+  return `# MEMORY.md
+
+## Key Facts
+
+Important information, decisions, and observations will be stored here.
+
+## Daily Logs
+
+- Daily notes are stored in separate files (see memory/ directory)
+- Each day has its own markdown file for detailed logs
+
+## How to Use
+
+- Add important facts as bullet points under relevant sections
+- Use headings to organize information
+- Keep entries concise but informative
+- Update or remove outdated information
+
+## Example Sections
+
+### Projects
+- Current projects and their status
+
+### Preferences
+- Specific tools, technologies, or approaches the user prefers
+
+### Important Dates
+- Deadlines, milestones, or significant events
+
+### Learnings
+- Insights gained from past interactions
+`;
 }
 
 /**

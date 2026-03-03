@@ -1,43 +1,20 @@
 /**
- * TUI Application using OpenTUI core
+ * TUI Application using Ink
  */
 
-import color from 'picocolors';
+import React, { createElement as h, useEffect, useState } from 'react';
+import { Box, Text, render, useApp, useInput, type Key } from 'ink';
 import { Agent, createAgent } from '../core/agent.js';
+import { InitAgent, createInitAgent } from '../core/init-agent.js';
 import { getSchedulerTicker, stopSchedulerTicker } from '../scheduler/index.js';
 import { loadConfig, startConfigHotReload, stopConfigReloader } from '../config/index.js';
 import { getRecentSession, getRecentMessages } from '../history/index.js';
 import { getHeartbeatManager, startAutonomousHeartbeat, stopHeartbeat } from '../core/heartbeat.js';
-
-type OTUICoreCompat = {
-  createCliRenderer: (config?: Record<string, unknown>) => Promise<any>;
-  BoxRenderable: new (ctx: unknown, options?: Record<string, unknown>) => any;
-  TextRenderable: new (ctx: unknown, options?: Record<string, unknown>) => any;
-};
-
-async function loadOpenTUICore(): Promise<OTUICoreCompat> {
-  const mod = (await import('@opentui/core')) as any;
-  if (!mod.createCliRenderer || !mod.BoxRenderable || !mod.TextRenderable) {
-    throw new Error('OpenTUI core API is not available in this runtime');
-  }
-  return {
-    createCliRenderer: mod.createCliRenderer,
-    BoxRenderable: mod.BoxRenderable,
-    TextRenderable: mod.TextRenderable,
-  };
-}
-
-interface KeyEvent {
-  name: string;
-  sequence: string;
-  ctrl: boolean;
-  shift: boolean;
-  meta: boolean;
-  option: boolean;
-}
+import { hasIdentityDocs } from '../identity/loader.js';
 
 export interface PiTUIAppOptions {
   theme?: 'dark' | 'light';
+  mode?: 'normal' | 'init';
 }
 
 interface ChatMessage {
@@ -52,65 +29,129 @@ interface ContextUsage {
   leftPercent: number;
 }
 
+interface HeartbeatView {
+  text: string;
+  color?: string;
+  dim?: boolean;
+}
+
+interface AppSnapshot {
+  config: ReturnType<typeof loadConfig>;
+  sessionId: string;
+  messages: ChatMessage[];
+  inputValue: string;
+  isProcessing: boolean;
+}
+
+interface CommandOption {
+  name: string;
+  usage: string;
+  description: string;
+}
+
+const COMMAND_OPTIONS: CommandOption[] = [
+  { name: 'help', usage: '/help', description: 'Show available commands' },
+  { name: 'new', usage: '/new', description: 'Start a new session' },
+  { name: 'memory', usage: '/memory <query>', description: 'Search knowledge memory' },
+  { name: 'history', usage: '/history <query>', description: 'Search chat history' },
+  { name: 'tasks', usage: '/tasks', description: 'Show scheduled tasks' },
+  { name: 'heartbeat', usage: '/heartbeat [start|stop|status]', description: 'Control autonomous mode' },
+  { name: 'config', usage: '/config', description: 'Show current configuration' },
+];
+
+interface CommandCompletionState {
+  isCommandMode: boolean;
+  query: string;
+  suggestions: CommandOption[];
+}
+
+function getCommandCompletionState(inputValue: string): CommandCompletionState {
+  if (!inputValue.startsWith('/')) {
+    return {
+      isCommandMode: false,
+      query: '',
+      suggestions: [],
+    };
+  }
+
+  const body = inputValue.slice(1);
+  const commandPart = body.split(/\s+/, 1)[0] ?? '';
+  const query = commandPart.toLowerCase();
+  const suggestions = COMMAND_OPTIONS.filter((option) => option.name.startsWith(query));
+
+  return {
+    isCommandMode: true,
+    query,
+    suggestions,
+  };
+}
+
+function applyCommandCompletion(inputValue: string, commandName: string): string {
+  const body = inputValue.slice(1);
+  const firstSpaceIndex = body.indexOf(' ');
+  const suffix = firstSpaceIndex >= 0 ? body.slice(firstSpaceIndex) : '';
+
+  if (suffix) {
+    return `/${commandName}${suffix}`;
+  }
+
+  return `/${commandName} `;
+}
+
 export class PiTUIApp {
-  private static readonly HISTORY_LIMIT = 120;
+  static readonly HISTORY_LIMIT = 120;
   private static readonly CONTEXT_WINDOW_MESSAGES = 50;
 
-  private opentui: OTUICoreCompat;
-  private renderer!: any;
-  private rootView: any = null;
-  private agent: Agent;
+  private agent: Agent | null = null;
+  private initAgent: InitAgent | null = null;
+  private mode: 'normal' | 'init';
   private config: ReturnType<typeof loadConfig>;
   private heartbeatStarted = false;
   private messages: ChatMessage[] = [];
   private inputValue = '';
   private isProcessing = false;
-  private statusTimer: NodeJS.Timeout | null = null;
   private stopped = false;
-  private resolveStopped!: () => void;
-  private stoppedPromise: Promise<void>;
 
-  constructor(opentui: OTUICoreCompat, _options: PiTUIAppOptions = {}) {
-    this.opentui = opentui;
+  private exitHandler: (() => void) | null = null;
+  private listeners = new Set<() => void>();
+
+  constructor(options: PiTUIAppOptions = {}) {
     this.config = loadConfig();
+    this.mode = options.mode || (hasIdentityDocs() ? 'normal' : 'init');
 
-    const recentSession = getRecentSession();
-    this.agent = createAgent({
-      sessionId: recentSession?.id,
-      onMessage: (msg) => this.handleAgentMessage(msg),
-      onToolCall: (name, args) => this.handleToolCall(name, args),
-    });
+    if (this.mode === 'init') {
+      // Initialization mode - use InitAgent
+      this.initAgent = createInitAgent({
+        onMessage: (msg) => this.handleAgentMessage(msg),
+        onComplete: () => this.handleInitComplete(),
+      });
+    } else {
+      // Normal mode - use regular Agent
+      const recentSession = getRecentSession();
+      this.agent = createAgent({
+        sessionId: recentSession?.id,
+        onMessage: (msg) => this.handleAgentMessage(msg),
+        onToolCall: (name, args) => this.handleToolCall(name, args),
+      });
 
-    this.stoppedPromise = new Promise<void>((resolve) => {
-      this.resolveStopped = resolve;
-    });
+      this.setupScheduler();
+      this.setupConfigHotReload();
 
-    this.setupScheduler();
-    this.setupConfigHotReload();
-
-    if (this.config.heartbeat.enabled) {
-      this.startHeartbeat();
+      if (this.config.heartbeat.enabled) {
+        this.startHeartbeat();
+      }
     }
   }
 
-  async start(): Promise<void> {
-    this.renderer = await this.opentui.createCliRenderer({
-      exitOnCtrlC: false,
-      onDestroy: () => this.finalizeStop(),
-    });
-
-    this.renderer.keyInput.on('keypress', (key: KeyEvent) => {
-      void this.handleKeypress(key);
-    });
-
-    this.loadRecentHistory();
-    this.render();
-
-    this.statusTimer = setInterval(() => {
-      this.render();
-    }, 1000);
-
-    return this.stoppedPromise;
+  initialize(): void {
+    if (this.mode === 'init' && this.initAgent) {
+      // Start initialization conversation
+      void this.initAgent.start();
+      this.addMessage('system', '🌟 Welcome! Let\'s get to know each other.');
+    } else {
+      this.loadRecentHistory();
+    }
+    this.emit();
   }
 
   stop(): void {
@@ -120,87 +161,140 @@ export class PiTUIApp {
 
     this.stopped = true;
 
-    if (this.statusTimer) {
-      clearInterval(this.statusTimer);
-      this.statusTimer = null;
-    }
-
     stopSchedulerTicker();
     stopHeartbeat();
     stopConfigReloader();
 
-    if (this.renderer) {
-      this.renderer.destroy();
-    }
+    this.emit();
 
-    this.finalizeStop();
-  }
-
-  private finalizeStop(): void {
-    if (!this.stopped) {
-      this.stopped = true;
-    }
-    this.resolveStopped();
-  }
-
-  private async handleKeypress(key: KeyEvent): Promise<void> {
-    if (this.stopped) {
-      return;
-    }
-
-    if (key.ctrl && key.name === 'c') {
-      this.stop();
-      return;
-    }
-
-    if (key.name === 'escape') {
-      this.inputValue = '';
-      this.render();
-      return;
-    }
-
-    if (key.name === 'enter' || key.name === 'return') {
-      const submitted = this.inputValue;
-      this.inputValue = '';
-      this.render();
-      await this.handleSubmit(submitted);
-      return;
-    }
-
-    if (key.name === 'backspace' || key.name === 'delete') {
-      this.inputValue = this.inputValue.slice(0, -1);
-      this.render();
-      return;
-    }
-
-    const char = this.getPrintableChar(key);
-    if (char) {
-      this.inputValue += char;
-      this.render();
+    if (this.exitHandler) {
+      this.exitHandler();
     }
   }
 
-  private getPrintableChar(key: KeyEvent): string {
-    if (key.ctrl || key.meta || key.option) {
-      return '';
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  setExitHandler(handler: (() => void) | null): () => void {
+    this.exitHandler = handler;
+    return () => {
+      if (this.exitHandler === handler) {
+        this.exitHandler = null;
+      }
+    };
+  }
+
+  getSnapshot(): AppSnapshot {
+    return {
+      config: this.config,
+      sessionId: this.agent?.getSessionId() || 'init-session',
+      messages: this.messages,
+      inputValue: this.inputValue,
+      isProcessing: this.isProcessing,
+    };
+  }
+
+  getContextUsage(): ContextUsage {
+    const maxTokens = Math.max(this.config.context.maxTokens, 1);
+    const windowMessages = this.messages.slice(-PiTUIApp.CONTEXT_WINDOW_MESSAGES);
+    const usedTokens = windowMessages.reduce((sum, msg) => sum + this.estimateTokens(msg.content), 0);
+    const leftPercent = Math.max(0, Math.min(100, Math.round((1 - usedTokens / maxTokens) * 100)));
+
+    return { usedTokens, maxTokens, leftPercent };
+  }
+
+  getHeartbeatView(): HeartbeatView {
+    const hb = getHeartbeatManager();
+    if (!hb.isRunning()) {
+      return { text: 'off', dim: true };
     }
 
-    if (key.name === 'space') {
-      return ' ';
+    const status = hb.getStatus();
+    if (status.state === 'executing') {
+      return { text: 'running', color: 'yellow' };
     }
 
-    if (key.sequence && key.sequence.length === 1 && key.sequence >= ' ') {
-      return key.sequence;
+    const mins = Math.floor(status.nextRunInMs / 60000);
+    if (mins < 1) {
+      return { text: 'in <1m', dim: true };
     }
 
-    if (key.name.length === 1) {
-      return key.name;
+    return { text: `in ${mins}m`, dim: true };
+  }
+
+  clearInput(): void {
+    this.inputValue = '';
+    this.emit();
+  }
+
+  setInputValue(raw: string): void {
+    this.inputValue = this.normalizeInput(raw);
+    this.emit();
+  }
+
+  backspaceInput(): void {
+    if (!this.inputValue) {
+      return;
     }
 
-    return '';
+    this.inputValue = this.inputValue.slice(0, -1);
+    this.emit();
+  }
+
+  appendInput(raw: string): void {
+    if (!raw || this.stopped) {
+      return;
+    }
+
+    const normalized = this.normalizeInput(raw);
+
+    if (!normalized) {
+      return;
+    }
+
+    this.inputValue += normalized;
+    this.emit();
+  }
+
+  async submitInput(): Promise<void> {
+    if (this.stopped || this.isProcessing) {
+      return;
+    }
+
+    const submitted = this.inputValue;
+    this.inputValue = '';
+    this.emit();
+
+    await this.handleSubmit(submitted);
+  }
+
+  private emit(): void {
+    for (const listener of this.listeners) {
+      listener();
+    }
+  }
+
+  private normalizeInput(raw: string): string {
+    return raw
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '');
+  }
+
+  private estimateTokens(content: string): number {
+    const text = content.trim();
+    if (!text) {
+      return 0;
+    }
+
+    return Math.ceil(text.length / 4) + 4;
   }
 
   private loadRecentHistory(): void {
+    if (!this.agent) return;
     const recent = getRecentMessages(this.agent.getSessionId(), PiTUIApp.HISTORY_LIMIT);
     this.messages = recent.map((msg) => ({
       role: msg.role,
@@ -215,6 +309,29 @@ export class PiTUIApp {
       return;
     }
 
+    // In init mode, handle exit specially
+    if (this.mode === 'init') {
+      if (trimmed === 'exit' || trimmed === 'quit') {
+        this.stop();
+        return;
+      }
+
+      this.addMessage('user', trimmed);
+      this.isProcessing = true;
+      this.emit();
+
+      try {
+        await this.initAgent?.sendMessage(trimmed);
+      } catch (error) {
+        this.addMessage('system', `Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+
+      this.isProcessing = false;
+      this.emit();
+      return;
+    }
+
+    // Normal mode
     this.recordUserActivity();
 
     if (trimmed === 'exit' || trimmed === 'quit') {
@@ -236,17 +353,17 @@ export class PiTUIApp {
 
     this.isProcessing = true;
     this.setBusy(true);
-    this.render();
+    this.emit();
 
     try {
-      await this.agent.sendMessage(trimmed);
+      await this.agent?.sendMessage(trimmed);
     } catch (error) {
       this.addMessage('system', `Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
 
     this.isProcessing = false;
     this.setBusy(false);
-    this.render();
+    this.emit();
   }
 
   private handleAgentMessage(msg: { role: string; content: string }): void {
@@ -268,203 +385,7 @@ export class PiTUIApp {
       this.messages = this.messages.slice(-400);
     }
 
-    this.render();
-  }
-
-  private estimateTokens(content: string): number {
-    const text = content.trim();
-    if (!text) {
-      return 0;
-    }
-    return Math.ceil(text.length / 4) + 4;
-  }
-
-  private getContextUsage(): ContextUsage {
-    const maxTokens = Math.max(this.config.context.maxTokens, 1);
-    const windowMessages = this.messages.slice(-PiTUIApp.CONTEXT_WINDOW_MESSAGES);
-    const usedTokens = windowMessages.reduce((sum, msg) => sum + this.estimateTokens(msg.content), 0);
-    const leftPercent = Math.max(0, Math.min(100, Math.round((1 - usedTokens / maxTokens) * 100)));
-
-    return { usedTokens, maxTokens, leftPercent };
-  }
-
-  private formatMessage(msg: ChatMessage): string {
-    const time = new Date(msg.timestamp).toLocaleTimeString('en-US', {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-
-    switch (msg.role) {
-      case 'user':
-        return `${color.dim(time)} ${color.cyan('You')}  ${msg.content}`;
-      case 'assistant':
-        return `\n${color.dim(time)} ${color.green('xz')}\n${msg.content}\n`;
-      case 'system':
-        return `${color.dim(time)} ${color.yellow('sys')} ${color.dim(msg.content)}`;
-      case 'tool':
-        return `${color.dim(time)} ${color.magenta('tool')} ${msg.content}`;
-      default:
-        return `${color.dim(time)} ${msg.content}`;
-    }
-  }
-
-  private renderWelcome(): string {
-    const lines = [
-      color.cyan('xz') + color.dim(' | AI Agent with Memory'),
-      color.dim('Type your message and press Enter'),
-      '',
-      `${color.dim('model')} ${color.green(this.config.model.provider)}/${color.green(this.config.model.model)}`,
-      `${color.dim('session')} ${color.dim(this.agent.getSessionId().slice(0, 16))}...`,
-      '',
-      color.dim('Try: /help'),
-    ];
-
-    return lines.join('\n');
-  }
-
-  private renderMessages(): string {
-    if (this.messages.length === 0) {
-      return this.renderWelcome();
-    }
-    return this.messages.slice(-140).map((m) => this.formatMessage(m)).join('\n');
-  }
-
-  private renderHeartbeatIndicator(): string {
-    const hb = getHeartbeatManager();
-    if (!hb.isRunning()) {
-      return color.dim('off');
-    }
-
-    const status = hb.getStatus();
-    if (status.state === 'executing') {
-      return color.yellow('running');
-    }
-
-    const mins = Math.floor(status.nextRunInMs / 60000);
-    return color.dim(mins < 1 ? 'in <1m' : `in ${mins}m`);
-  }
-
-  private renderHeaderContent(): string {
-    const providerModel = `${this.config.model.provider}/${this.config.model.model}`;
-    const sessionShort = this.agent.getSessionId().slice(0, 12);
-    const state = this.isProcessing ? color.yellow('busy') : color.green('ready');
-
-    return [
-      `${color.cyan('xz')} ${color.dim('AI Agent')}`,
-      `${color.dim(providerModel)}  ${color.dim('session')} ${color.white(sessionShort)}  ${color.dim('hb')} ${this.renderHeartbeatIndicator()}  ${color.dim('state')} ${state}`,
-    ].join('\n');
-  }
-
-  private renderContextFooter(): string {
-    const usage = this.getContextUsage();
-    const percentText = `${usage.leftPercent}% left`;
-
-    if (usage.leftPercent <= 10) {
-      return color.red(percentText);
-    }
-    if (usage.leftPercent <= 30) {
-      return color.yellow(percentText);
-    }
-    return color.dim(percentText);
-  }
-
-  private renderInputLine(): string {
-    const prompt = this.isProcessing ? color.yellow('>') : color.cyan('>');
-    const cursor = this.isProcessing ? '' : color.dim('▌');
-    return `${prompt} ${this.inputValue}${cursor}`;
-  }
-
-  private renderInputHint(): string {
-    return color.dim('/help  /new  /memory  /history  /tasks  /heartbeat  /config  Ctrl+C quit');
-  }
-
-  private render(): void {
-    if (this.stopped || !this.renderer) {
-      return;
-    }
-
-    const root = new this.opentui.BoxRenderable(this.renderer, {
-      width: '100%',
-      height: '100%',
-      flexDirection: 'column',
-      padding: 1,
-      gap: 1,
-    });
-
-    const headerBox = new this.opentui.BoxRenderable(this.renderer, {
-      border: true,
-      borderStyle: 'single',
-      padding: 1,
-    });
-
-    const headerText = new this.opentui.TextRenderable(this.renderer, {
-      content: this.renderHeaderContent(),
-    });
-
-    headerBox.add(headerText);
-
-    const conversationBox = new this.opentui.BoxRenderable(this.renderer, {
-      flexGrow: 1,
-      border: true,
-      borderStyle: 'rounded',
-      title: 'Conversation',
-      padding: 1,
-      flexDirection: 'column',
-      gap: 1,
-    });
-
-    const transcriptWrap = new this.opentui.BoxRenderable(this.renderer, {
-      flexGrow: 1,
-      overflow: 'hidden',
-      minHeight: 4,
-    });
-
-    const transcriptText = new this.opentui.TextRenderable(this.renderer, {
-      content: this.renderMessages(),
-      width: '100%',
-      height: '100%',
-    });
-
-    const contextFooter = new this.opentui.TextRenderable(this.renderer, {
-      content: this.renderContextFooter(),
-    });
-
-    transcriptWrap.add(transcriptText);
-    conversationBox.add(transcriptWrap);
-    conversationBox.add(contextFooter);
-
-    const inputBox = new this.opentui.BoxRenderable(this.renderer, {
-      border: true,
-      borderStyle: 'single',
-      title: this.isProcessing ? 'Thinking' : 'Input',
-      padding: 1,
-      flexDirection: 'column',
-      gap: 1,
-    });
-
-    const inputText = new this.opentui.TextRenderable(this.renderer, {
-      content: this.renderInputLine(),
-    });
-
-    const hintText = new this.opentui.TextRenderable(this.renderer, {
-      content: this.renderInputHint(),
-    });
-
-    inputBox.add(inputText);
-    inputBox.add(hintText);
-
-    root.add(headerBox);
-    root.add(conversationBox);
-    root.add(inputBox);
-
-    if (this.rootView) {
-      this.renderer.root.remove(this.rootView);
-      this.rootView.destroy();
-    }
-
-    this.rootView = root;
-    this.renderer.root.add(root);
-    this.renderer.requestRender();
+    this.emit();
   }
 
   private async handleCommand(input: string): Promise<void> {
@@ -523,7 +444,7 @@ export class PiTUIApp {
 
         this.addMessage('system', `Scheduled tasks (${tasks.length}):`);
         tasks.slice(0, 10).forEach((t) => {
-          const status = t.isEnabled ? '●' : '○';
+          const status = t.isEnabled ? 'on' : 'off';
           const when = t.executeAt ? new Date(t.executeAt).toLocaleTimeString() : 'recurring';
           this.addMessage('system', `  ${status} ${t.description} (${when})`);
         });
@@ -568,22 +489,22 @@ export class PiTUIApp {
   }
 
   private showHelp(): void {
-    const helpText = `
-Commands:
-  /new           Start a new session
-  /memory        Search knowledge memory
-  /history       Search chat history
-  /tasks         List scheduled tasks
-  /heartbeat     Show/control autonomous mode
-  /config        Show configuration
-  /help          Show this help
-  exit           Quit xz
-
-Shortcuts:
-  Enter          Submit input
-  Esc            Clear input
-  Ctrl+C         Quit
-`;
+    const helpText = [
+      'Commands:',
+      '  /new           Start a new session',
+      '  /memory        Search knowledge memory',
+      '  /history       Search chat history',
+      '  /tasks         List scheduled tasks',
+      '  /heartbeat     Show/control autonomous mode',
+      '  /config        Show configuration',
+      '  /help          Show this help',
+      '  exit           Quit xz',
+      '',
+      'Shortcuts:',
+      '  Enter          Submit input',
+      '  Esc            Clear input',
+      '  Ctrl+C         Quit',
+    ].join('\n');
 
     this.addMessage('system', helpText);
   }
@@ -596,7 +517,7 @@ Shortcuts:
     const ticker = getSchedulerTicker({
       onTaskDue: (task) => {
         this.addMessage('system', `Task: ${task.description}`);
-        void this.agent.handleWakeup(task.description);
+        void this.agent?.handleWakeup(task.description);
       },
     });
 
@@ -628,13 +549,13 @@ Shortcuts:
     });
 
     this.heartbeatStarted = true;
-    this.render();
+    this.emit();
   }
 
   stopHeartbeat(): void {
     stopHeartbeat();
     this.heartbeatStarted = false;
-    this.render();
+    this.emit();
   }
 
   private recordUserActivity(): void {
@@ -644,19 +565,354 @@ Shortcuts:
   private setBusy(busy: boolean): void {
     getHeartbeatManager().setBusy(busy);
   }
+
+  /**
+   * Handle initialization completion
+   */
+  private handleInitComplete(): void {
+    // Switch to normal mode after a short delay
+    setTimeout(() => {
+      this.mode = 'normal';
+      this.initAgent = null;
+
+      // Create normal agent
+      this.agent = createAgent({
+        onMessage: (msg) => this.handleAgentMessage(msg),
+        onToolCall: (name, args) => this.handleToolCall(name, args),
+      });
+
+      this.setupScheduler();
+      this.setupConfigHotReload();
+
+      if (this.config.heartbeat.enabled) {
+        this.startHeartbeat();
+      }
+
+      this.addMessage('system', 'Initialization complete! Starting normal mode...');
+      this.emit();
+    }, 2000);
+  }
+}
+
+interface InkTUIRootProps {
+  app: PiTUIApp;
+}
+
+function formatTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function renderMessage(message: ChatMessage, index: number): React.ReactElement {
+  const key = `msg-${message.timestamp}-${index}`;
+  const time = formatTime(message.timestamp);
+
+  if (message.role === 'assistant') {
+    return h(
+      Box,
+      { key, flexDirection: 'column' },
+      h(
+        Text,
+        null,
+        h(Text, { dimColor: true }, `${time} `),
+        h(Text, { color: 'green', bold: true }, 'xz'),
+      ),
+      h(Text, null, message.content),
+    );
+  }
+
+  if (message.role === 'user') {
+    return h(
+      Text,
+      { key },
+      h(Text, { dimColor: true }, `${time} `),
+      h(Text, { color: 'cyan', bold: true }, 'you'),
+      `  ${message.content}`,
+    );
+  }
+
+  if (message.role === 'tool') {
+    return h(
+      Text,
+      { key },
+      h(Text, { dimColor: true }, `${time} `),
+      h(Text, { color: 'magenta', bold: true }, 'tool'),
+      ` ${message.content}`,
+    );
+  }
+
+  return h(
+    Text,
+    { key },
+    h(Text, { dimColor: true }, `${time} `),
+    h(Text, { color: 'yellow', bold: true }, 'sys'),
+    ` ${message.content}`,
+  );
+}
+
+function InkTUIRoot({ app }: InkTUIRootProps): React.ReactElement {
+  const { exit } = useApp();
+  const [snapshot, setSnapshot] = useState<AppSnapshot>(() => app.getSnapshot());
+  const [, setTicker] = useState(0);
+  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+
+  const completionState = getCommandCompletionState(snapshot.inputValue);
+  const commandSuggestions = completionState.suggestions;
+  const safeSelectedCommandIndex =
+    commandSuggestions.length > 0 ? Math.min(selectedCommandIndex, commandSuggestions.length - 1) : 0;
+  const selectedCommand = commandSuggestions[safeSelectedCommandIndex];
+
+  useEffect(() => {
+    const unsubscribe = app.subscribe(() => {
+      setSnapshot(app.getSnapshot());
+    });
+
+    return unsubscribe;
+  }, [app]);
+
+  useEffect(() => {
+    const release = app.setExitHandler(() => {
+      exit();
+    });
+
+    return release;
+  }, [app, exit]);
+
+  useEffect(() => {
+    app.initialize();
+
+    const timer = setInterval(() => {
+      setTicker((value) => value + 1);
+    }, 1000);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [app]);
+
+  useEffect(() => {
+    setSelectedCommandIndex(0);
+  }, [completionState.isCommandMode, completionState.query]);
+
+  useEffect(() => {
+    if (selectedCommandIndex >= commandSuggestions.length && commandSuggestions.length > 0) {
+      setSelectedCommandIndex(0);
+    }
+  }, [commandSuggestions.length, selectedCommandIndex]);
+
+  useInput((input: string, key: Key) => {
+    if (key.ctrl && input === 'c') {
+      app.stop();
+      return;
+    }
+
+    if (key.return) {
+      void app.submitInput();
+      return;
+    }
+
+    if (key.escape) {
+      app.clearInput();
+      return;
+    }
+
+    if (key.backspace || key.delete) {
+      app.backspaceInput();
+      return;
+    }
+
+    if (completionState.isCommandMode && commandSuggestions.length > 0 && key.upArrow) {
+      setSelectedCommandIndex((value) => (value <= 0 ? commandSuggestions.length - 1 : value - 1));
+      return;
+    }
+
+    if (completionState.isCommandMode && commandSuggestions.length > 0 && key.downArrow) {
+      setSelectedCommandIndex((value) => (value + 1) % commandSuggestions.length);
+      return;
+    }
+
+    if (completionState.isCommandMode && commandSuggestions.length > 0 && key.tab) {
+      const target = commandSuggestions[safeSelectedCommandIndex];
+      app.setInputValue(applyCommandCompletion(snapshot.inputValue, target.name));
+      return;
+    }
+
+    if (key.tab || key.upArrow || key.downArrow || key.leftArrow || key.rightArrow) {
+      return;
+    }
+
+    app.appendInput(input);
+  });
+
+  const visibleMessages = snapshot.messages.slice(-80);
+  const contextUsage = app.getContextUsage();
+  const heartbeat = app.getHeartbeatView();
+
+  const contextProps: {
+    color?: string;
+    dimColor?: boolean;
+    bold?: boolean;
+  } = { dimColor: true };
+
+  if (contextUsage.leftPercent <= 10) {
+    contextProps.color = 'red';
+    contextProps.dimColor = false;
+    contextProps.bold = true;
+  } else if (contextUsage.leftPercent <= 30) {
+    contextProps.color = 'yellow';
+    contextProps.dimColor = false;
+  }
+
+  const heartbeatProps: {
+    color?: string;
+    dimColor?: boolean;
+  } = {
+    dimColor: heartbeat.dim ?? false,
+  };
+
+  if (heartbeat.color) {
+    heartbeatProps.color = heartbeat.color;
+    heartbeatProps.dimColor = false;
+  }
+
+  const inputHint = completionState.isCommandMode ? 'Tab 补全 · ↑↓ 选择 · Enter 执行' : '/ 可以用命令';
+
+  return h(
+    Box,
+    {
+      flexDirection: 'column',
+      height: '100%',
+      paddingX: 1,
+      paddingY: 0,
+    },
+    h(
+      Box,
+      {
+        borderStyle: 'round',
+        borderColor: 'cyan',
+        paddingX: 1,
+        flexDirection: 'column',
+      },
+      h(
+        Text,
+        null,
+        h(Text, { color: 'cyan', bold: true }, 'xz'),
+        h(Text, { dimColor: true }, ' AI Agent'),
+      ),
+      h(
+        Text,
+        null,
+        h(Text, { dimColor: true }, `${snapshot.config.model.provider}/${snapshot.config.model.model}  session ${snapshot.sessionId.slice(0, 12)}  hb `),
+        h(Text, heartbeatProps, heartbeat.text),
+        h(Text, { dimColor: true }, '  state '),
+        h(Text, { color: snapshot.isProcessing ? 'yellow' : 'green' }, snapshot.isProcessing ? 'busy' : 'ready'),
+      ),
+    ),
+    h(
+      Box,
+      {
+        marginTop: 1,
+        flexGrow: 1,
+        minHeight: 8,
+        borderStyle: 'round',
+        borderColor: 'blue',
+        paddingX: 1,
+        paddingY: 0,
+        flexDirection: 'column',
+        overflow: 'hidden',
+      },
+      h(Text, { dimColor: true }, 'Conversation'),
+      h(
+        Box,
+        {
+          flexGrow: 1,
+          flexDirection: 'column',
+          overflow: 'hidden',
+          marginTop: 1,
+        },
+        ...(visibleMessages.length === 0
+          ? [
+              h(Text, { key: 'welcome-title', color: 'cyan', bold: true }, 'Welcome to xz'),
+              h(Text, { key: 'welcome-sub', dimColor: true }, 'Type your message and press Enter'),
+              h(Text, { key: 'welcome-help', dimColor: true }, 'Try /help for commands'),
+            ]
+          : visibleMessages.map((message, index) => renderMessage(message, index))),
+      ),
+      h(
+        Box,
+        {
+          justifyContent: 'flex-end',
+        },
+        h(Text, contextProps, `${contextUsage.leftPercent}% left`),
+      ),
+    ),
+    h(
+      Box,
+      {
+        marginTop: 1,
+        borderStyle: 'round',
+        borderColor: snapshot.isProcessing ? 'yellow' : 'cyan',
+        paddingX: 1,
+        flexDirection: 'column',
+      },
+      h(
+        Text,
+        null,
+        h(Text, { color: snapshot.isProcessing ? 'yellow' : 'cyan', bold: true }, '>'),
+        ` ${snapshot.inputValue}`,
+        !snapshot.isProcessing && h(Text, { dimColor: true }, '|'),
+      ),
+      h(Text, { dimColor: true }, inputHint),
+      completionState.isCommandMode &&
+        (commandSuggestions.length === 0
+          ? h(Text, { color: 'yellow' }, `没有匹配命令: /${completionState.query}`)
+          : h(
+              Box,
+              {
+                flexDirection: 'row',
+                flexWrap: 'wrap',
+              },
+              ...commandSuggestions.map((option, index) =>
+                h(
+                  Text,
+                  {
+                    key: `suggestion-${option.name}`,
+                    color: index === safeSelectedCommandIndex ? 'cyan' : undefined,
+                    dimColor: index !== safeSelectedCommandIndex,
+                    bold: index === safeSelectedCommandIndex,
+                  },
+                  `${index === safeSelectedCommandIndex ? '› ' : ''}${option.usage}  `,
+                ),
+              ),
+            )),
+      completionState.isCommandMode &&
+        commandSuggestions.length > 0 &&
+        selectedCommand &&
+        h(Text, { dimColor: true }, `${selectedCommand.usage} - ${selectedCommand.description}`),
+    ),
+  );
 }
 
 export async function runTUI(options?: PiTUIAppOptions): Promise<void> {
-  let opentui: OTUICoreCompat;
+  const app = new PiTUIApp(options);
+  const instance = render(h(InkTUIRoot, { app }), { exitOnCtrlC: false });
+
+  const onSignal = (): void => {
+    app.stop();
+    instance.unmount();
+  };
+
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
 
   try {
-    opentui = await loadOpenTUICore();
-  } catch {
-    const { runTUI: runLegacyTUI } = await import('./app.js');
-    await runLegacyTUI();
-    return;
+    await instance.waitUntilExit();
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+    app.stop();
+    instance.unmount();
   }
-
-  const app = new PiTUIApp(opentui, options);
-  await app.start();
 }

@@ -5,11 +5,18 @@
 
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
+import { getXZHome, ensureXZHome } from '../config/index.js';
 
-const AGENTS_DIR = '.agents';
 const SOUL_FILE = 'SOUL.md';
 const USER_FILE = 'USER.md';
 const MEMORY_FILE = 'MEMORY.md';
+
+/**
+ * Get the identity documents directory
+ */
+function getIdentityDir(): string {
+  return ensureXZHome();
+}
 
 export interface IdentityDocs {
   soul: string | null;
@@ -21,10 +28,11 @@ export interface IdentityDocs {
  * Load identity documents
  */
 export function loadIdentityDocs(): IdentityDocs {
+  const dir = getIdentityDir();
   return {
-    soul: loadDoc(join(AGENTS_DIR, SOUL_FILE)),
-    user: loadDoc(join(AGENTS_DIR, USER_FILE)),
-    memory: loadDoc(join(AGENTS_DIR, MEMORY_FILE)),
+    soul: loadDoc(join(dir, SOUL_FILE)),
+    user: loadDoc(join(dir, USER_FILE)),
+    memory: loadDoc(join(dir, MEMORY_FILE)),
   };
 }
 
@@ -48,9 +56,10 @@ function loadDoc(path: string): string | null {
  * Check if identity documents exist
  */
 export function hasIdentityDocs(): boolean {
-  return existsSync(join(AGENTS_DIR, SOUL_FILE)) ||
-         existsSync(join(AGENTS_DIR, USER_FILE)) ||
-         existsSync(join(AGENTS_DIR, MEMORY_FILE));
+  const dir = getXZHome();
+  return existsSync(join(dir, SOUL_FILE)) ||
+         existsSync(join(dir, USER_FILE)) ||
+         existsSync(join(dir, MEMORY_FILE));
 }
 
 /**

@@ -1,15 +1,19 @@
 /**
  * SQLite database for history, knowledge, and scheduler
- * Single database file: data/agent.db
+ * Single database file: $XZ_HOME/agent.db
  */
 
 import Database from 'better-sqlite3';
 import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
+import { getXZHome, ensureXZHome } from '../config/index.js';
 
-// Database path (relative to cwd or absolute)
-const DATA_DIR = 'data';
-const DB_PATH = join(DATA_DIR, 'agent.db');
+/**
+ * Get database file path
+ */
+function getDBPath(): string {
+  return join(getXZHome(), 'agent.db');
+}
 
 let db: Database.Database | null = null;
 
@@ -18,12 +22,11 @@ let db: Database.Database | null = null;
  */
 export function getDatabase(): Database.Database {
   if (!db) {
-    // Ensure data directory exists
-    if (!existsSync(DATA_DIR)) {
-      mkdirSync(DATA_DIR, { recursive: true });
-    }
+    // Ensure XZ_HOME directory exists
+    const dbPath = getDBPath();
+    ensureXZHome();
 
-    db = new Database(DB_PATH);
+    db = new Database(dbPath);
     db.pragma('journal_mode = WAL');
     
     // Initialize schema
@@ -194,7 +197,7 @@ export async function resetDatabase(): Promise<void> {
   closeDatabase();
   const { unlinkSync } = await import('fs');
   try {
-    unlinkSync(DB_PATH);
+    unlinkSync(getDBPath());
   } catch {
     // File may not exist
   }

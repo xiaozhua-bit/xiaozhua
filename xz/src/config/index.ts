@@ -12,8 +12,27 @@ import { validateConfig, ValidationResult } from './validators.js';
 import { detectKimiCredentials } from './kimi.js';
 
 // Config paths
-export const CONFIG_DIR = join(homedir(), '.xz');
+export const CONFIG_DIR = getXZHome();
 export const CONFIG_FILE = join(CONFIG_DIR, 'config.toml');
+
+/**
+ * Get XZ_HOME directory path
+ * Uses XZ_HOME env var, or defaults to ~/.xz
+ */
+export function getXZHome(): string {
+  return process.env.XZ_HOME || join(homedir(), '.xz');
+}
+
+/**
+ * Ensure XZ_HOME directory exists
+ */
+export function ensureXZHome(): string {
+  const home = getXZHome();
+  if (!existsSync(home)) {
+    mkdirSync(home, { recursive: true });
+  }
+  return home;
+}
 
 /**
  * Check if this is the first run (config doesn't exist)
