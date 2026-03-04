@@ -477,7 +477,6 @@ export class Agent {
           required: ['command'],
         } as any,
         execute: async (_toolCallId, args) => {
-          this.onToolCall?.('bash', args);
           const result = await this.executeBash(String(args.command ?? ''), Number(args.timeout ?? 60));
           return this.toolText(result);
         },
@@ -502,7 +501,6 @@ export class Agent {
           required: ['query'],
         } as any,
         execute: async (_toolCallId, args) => {
-          this.onToolCall?.('memory_search', args);
           const result = await this.executeMemorySearch(String(args.query ?? ''), Number(args.limit ?? 5));
           return this.toolText(result);
         },
@@ -530,7 +528,6 @@ export class Agent {
           required: ['file', 'start_line'],
         } as any,
         execute: async (_toolCallId, args) => {
-          this.onToolCall?.('memory_get', args);
           const result = await this.executeMemoryGet(
             String(args.file ?? ''),
             Number(args.start_line ?? 1),
@@ -562,7 +559,6 @@ export class Agent {
           required: ['path', 'oldText', 'newText'],
         } as any,
         execute: async (_toolCallId, args) => {
-          this.onToolCall?.('edit_file', args);
           const result = await this.executeEditFile(
             String(args.path ?? ''),
             String(args.oldText ?? args.old_text ?? ''),
@@ -595,7 +591,6 @@ export class Agent {
           required: ['description', 'when'],
         } as any,
         execute: async (_toolCallId, args) => {
-          this.onToolCall?.('schedule_task', args);
           const result = await this.executeScheduleTask(
             String(args.description ?? ''),
             String(args.when ?? ''),
@@ -630,7 +625,6 @@ export class Agent {
           required: ['path', 'value'],
         } as any,
         execute: async (_toolCallId, args) => {
-          this.onToolCall?.('update_config', args);
           const result = await this.executeUpdateConfig(String(args.path ?? ''), args.value);
           return this.toolText(result);
         },
