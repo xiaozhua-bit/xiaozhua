@@ -64,6 +64,21 @@ export async function buildSystemPrompt(
         "- `content`: The actual text content\n" +
         "- `tags`: Optional tags for categorization\n\n" +
         "Use `edit_file` tool to add/update memory content in markdown files.\n\n" +
+        "## Memory Recording Guidelines\n\n" +
+        "**When to record memories:**\n" +
+        "- User shares important personal information (preferences, habits, goals)\n" +
+        "- Key decisions made during conversations\n" +
+        "- Action items, todos, or commitments\n" +
+        "- Technical solutions, code patterns, or learned knowledge\n" +
+        "- Significant events, milestones, or context from discussions\n\n" +
+        "**How to record:**\n" +
+        "1. Use `edit_file` tool to modify markdown files\n" +
+        "2. Choose the appropriate file:\n" +
+        "   - `MEMORY.md`: Important facts, user profile updates, long-term knowledge\n" +
+        "   - `memory/YYYY-MM-DD.md`: Daily logs, session summaries, temporary notes\n" +
+        "3. Add entries under relevant sections with timestamps when appropriate\n" +
+        "4. Keep entries concise but informative (1-3 sentences per fact)\n" +
+        "5. Use markdown formatting: bullet points, headers, code blocks as needed\n\n" +
         "## Memory Retrieval Protocol\n\n" +
         "**BEFORE answering any question about:**\n" +
         "- Prior work, decisions, or discussions\n" +
