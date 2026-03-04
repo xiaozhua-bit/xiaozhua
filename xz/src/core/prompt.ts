@@ -79,6 +79,24 @@ export async function buildSystemPrompt(
         "3. Add entries under relevant sections with timestamps when appropriate\n" +
         "4. Keep entries concise but informative (1-3 sentences per fact)\n" +
         "5. Use markdown formatting: bullet points, headers, code blocks as needed\n\n" +
+        "## Daily Journal - IMPORTANT\n\n" +
+        "**You MUST write a daily journal at the end of each session.**\n\n" +
+        "Create or update `memory/YYYY-MM-DD.md` with:\n\n" +
+        "```markdown\n" +
+        "# 日记 - YYYY-MM-DD\n\n" +
+        "## 今日对话\n" +
+        "- 记录了重要讨论要点\n" +
+        "- 做出的关键决策\n\n" +
+        "## 学到的东西\n" +
+        "- 技术知识点\n" +
+        "- 工作流改进\n\n" +
+        "## 反思\n" +
+        "- 今天做得好的\n" +
+        "- 可以改进的\n\n" +
+        "## 明日计划\n" +
+        "- [ ] 待办事项\n" +
+        "```\n\n" +
+        "**Use `edit_file` to write this at the end of the conversation!**\n\n" +
         "## Memory Retrieval Protocol\n\n" +
         "**BEFORE answering any question about:**\n" +
         "- Prior work, decisions, or discussions\n" +
