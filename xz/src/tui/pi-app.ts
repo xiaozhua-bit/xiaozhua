@@ -213,14 +213,10 @@ export class PiTUIApp {
 
   getContextUsage(): ContextUsage {
     const maxTokens = Math.max(this.config.context.maxTokens, 1);
-    const windowMessages = this.messages.slice(-PiTUIApp.CONTEXT_WINDOW_MESSAGES);
-    const usedTokens = windowMessages.reduce((sum, msg) => sum + this.estimateTokens(msg.content), 0);
-    const tokenLeftRatio = Math.max(0, Math.min(1, 1 - usedTokens / maxTokens));
-    const messageLeftRatio = Math.max(
-      0,
-      Math.min(1, 1 - windowMessages.length / PiTUIApp.CONTEXT_WINDOW_MESSAGES),
-    );
-    const leftPercent = Math.max(0, Math.min(100, Math.round(Math.min(tokenLeftRatio, messageLeftRatio) * 100)));
+    // Calculate tokens for all messages that would be sent to agent
+    // (agent uses limit: 50, but we calculate based on actual token usage)
+    const usedTokens = this.messages.reduce((sum, msg) => sum + this.estimateTokens(msg.content), 0);
+    const leftPercent = Math.max(0, Math.min(100, Math.round((1 - usedTokens / maxTokens) * 100)));
 
     return { usedTokens, maxTokens, leftPercent };
   }
