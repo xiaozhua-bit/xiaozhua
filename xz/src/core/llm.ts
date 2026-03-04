@@ -34,6 +34,7 @@ export interface LLMOptions {
   temperature?: number;
   maxTokens?: number;
   tools?: Tool[];
+  signal?: AbortSignal;
 }
 
 export interface LLMResponse {
@@ -78,6 +79,7 @@ export class LLMClient {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      signal: options.signal,
     });
 
     if (!response.ok) {
@@ -125,6 +127,7 @@ export class LLMClient {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      signal: options.signal,
     });
 
     if (!response.ok) {

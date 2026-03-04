@@ -20,6 +20,8 @@ export interface SkillRegistry {
 }
 
 export interface SkillLoaderOptions {
-  agentsSkillsPath: string;
-  claudeSkillsPath: string;
+  xzSkillsPath: string;
+  homeAgentsSkillsPath: string;
+  projectAgentsSkillsPath: string;
+  legacyClaudeSkillsPath?: string;
 }

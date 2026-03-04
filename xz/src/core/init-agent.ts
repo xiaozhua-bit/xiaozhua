@@ -92,6 +92,7 @@ export class InitAgent {
   private onMessage?: (message: Message) => void;
   private onComplete?: () => void;
   private completed = false;
+  private currentRunAbortController: AbortController | null = null;
 
   constructor(options: InitAgentOptions = {}) {
     this.config = loadConfig();
@@ -108,10 +109,26 @@ export class InitAgent {
    */
   async start(): Promise<void> {
     // Get initial greeting from AI
-    const response = await this.llm.chat(this.messages, { tools: [COMPLETION_TOOL] });
+    const controller = new AbortController();
+    this.currentRunAbortController = controller;
+    try {
+      const response = await this.llm.chat(this.messages, {
+        tools: [COMPLETION_TOOL],
+        signal: controller.signal,
+      });
 
-    if (response.content) {
-      this.addMessage('assistant', response.content);
+      if (response.content) {
+        this.addMessage('assistant', response.content);
+      }
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        return;
+      }
+      this.addMessage('system', `Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      if (this.currentRunAbortController === controller) {
+        this.currentRunAbortController = null;
+      }
     }
   }
 
@@ -123,8 +140,14 @@ export class InitAgent {
 
     this.addMessage('user', content);
 
+    const controller = new AbortController();
+    this.currentRunAbortController = controller;
+
     try {
-      const response = await this.llm.chat(this.messages, { tools: [COMPLETION_TOOL] });
+      const response = await this.llm.chat(this.messages, {
+        tools: [COMPLETION_TOOL],
+        signal: controller.signal,
+      });
 
       // Check if AI wants to complete initialization
       if (response.toolCalls && response.toolCalls.length > 0) {
@@ -141,8 +164,28 @@ export class InitAgent {
         this.addMessage('assistant', response.content);
       }
     } catch (error) {
+      if (this.isAbortError(error)) {
+        return;
+      }
       this.addMessage('system', `Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      if (this.currentRunAbortController === controller) {
+        this.currentRunAbortController = null;
+      }
     }
+  }
+
+  isRunning(): boolean {
+    return this.currentRunAbortController !== null;
+  }
+
+  abortCurrentRun(): boolean {
+    if (!this.currentRunAbortController) {
+      return false;
+    }
+
+    this.currentRunAbortController.abort();
+    return true;
   }
 
   /**
@@ -207,6 +250,10 @@ export class InitAgent {
   private addMessage(role: Message['role'], content: string): void {
     this.messages.push({ role, content });
     this.onMessage?.({ role, content });
+  }
+
+  private isAbortError(error: unknown): boolean {
+    return error instanceof Error && error.name === 'AbortError';
   }
 
   private generateSOUL(params: {

@@ -42,7 +42,6 @@ export class TUIApp {
   private running = false;
   private config: ReturnType<typeof loadConfig>;
   private heartbeatStarted = false;
-  private messageCount = 0;
   private contextStats: ContextStats;
 
   constructor(options: TUIAppOptions = {}) {
@@ -63,6 +62,7 @@ export class TUIApp {
       onMessage: (msg) => this.handleAgentMessage(msg),
       onToolCall: (name, args) => this.displayToolCall(name, args),
     });
+    this.syncContextStatsFromAgent();
 
     // Setup background services
     this.setupScheduler();
@@ -98,7 +98,7 @@ export class TUIApp {
       if (!input || !this.running) break;
       
       await this.handleInput(input);
-      this.updateContextStats(input);
+      this.syncContextStatsFromAgent();
     }
   }
 
@@ -149,7 +149,6 @@ export class TUIApp {
     
     // Record activity
     this.recordUserActivity();
-    this.messageCount++;
 
     // Handle commands
     if (trimmed === 'exit' || trimmed === 'quit') {
@@ -191,7 +190,7 @@ export class TUIApp {
     }
     
     // Update stats after receiving message
-    this.updateContextStats(msg.content);
+    this.syncContextStatsFromAgent();
   }
 
   /**
@@ -277,17 +276,11 @@ export class TUIApp {
     return color.dim(`● auto ${mins}m`);
   }
 
-  /**
-   * Update context usage estimation
-   */
-  private updateContextStats(newContent: string): void {
-    // Rough estimate: 4 chars = 1 token
-    const newTokens = Math.ceil(newContent.length / 4);
-    this.contextStats.usedTokens += newTokens;
-    this.contextStats.messageCount++;
-    
-    // Calculate percentage
-    this.contextStats.percentage = 
+  private syncContextStatsFromAgent(): void {
+    const stats = this.agent.getContextStats();
+    this.contextStats.usedTokens = stats.usedTokens;
+    this.contextStats.messageCount = stats.messageCount;
+    this.contextStats.percentage =
       (this.contextStats.usedTokens / this.contextStats.maxTokens) * 100;
   }
 
@@ -346,20 +339,23 @@ ${color.cyan('Context Bar:')}
       console.log();
       
       for (const msg of messages) {
+        if (msg.content.trim().length === 0) {
+          continue;
+        }
+
         if (msg.role === 'user') {
           console.log(`${color.dim('>')} ${msg.content.slice(0, 100)}${msg.content.length > 100 ? '...' : ''}`);
         } else if (msg.role === 'assistant') {
           console.log(`${color.green('🤖')} ${msg.content.slice(0, 150)}${msg.content.length > 150 ? '...' : ''}`);
           console.log();
         }
-        
-        // Update stats
-        this.updateContextStats(msg.content);
       }
       
       console.log(color.dim('  ────────────────────'));
       console.log();
     }
+
+    this.syncContextStatsFromAgent();
   }
 
   /**
@@ -387,6 +383,7 @@ ${color.cyan('Context Bar:')}
           percentage: 0,
           messageCount: 0,
         };
+        this.syncContextStatsFromAgent();
         
         await new Promise(r => setTimeout(r, 300));
         s.stop(`New session: ${color.cyan(this.agent.getSessionId().slice(0, 16))}...`);
@@ -539,6 +536,8 @@ ${color.cyan('Context Bar:')}
   private setupConfigHotReload(): void {
     startConfigHotReload((newConfig, _oldConfig, changes) => {
       this.config = newConfig;
+      this.contextStats.maxTokens = Math.max(newConfig.context.maxTokens, 1);
+      this.syncContextStatsFromAgent();
       this.printSystemMessage(`Config reloaded: ${changes.join(', ')}`);
 
       if (changes.some(c => c.includes('heartbeat'))) {

@@ -1,15 +1,18 @@
 /**
- * Skill loader - loads skills from .agents/skills and .claude/skills
+ * Skill loader - loads skills from ~/.xz/skills, ~/.agents/skills and project .agents/skills
  */
 
 import { existsSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { getXZHome } from '../config/index.js';
 import type { Skill, SkillLoaderOptions } from './types.js';
 
 const DEFAULT_OPTIONS: SkillLoaderOptions = {
-  agentsSkillsPath: join(process.cwd(), '.agents', 'skills'),
-  claudeSkillsPath: join(homedir(), '.claude', 'skills'),
+  xzSkillsPath: join(getXZHome(), 'skills'),
+  homeAgentsSkillsPath: join(homedir(), '.agents', 'skills'),
+  projectAgentsSkillsPath: join(process.cwd(), '.agents', 'skills'),
+  legacyClaudeSkillsPath: join(homedir(), '.claude', 'skills'),
 };
 
 /**
@@ -19,17 +22,33 @@ export async function loadSkills(options: Partial<SkillLoaderOptions> = {}): Pro
   const opts = { ...DEFAULT_OPTIONS, ...options };
   const skills: Map<string, Skill> = new Map();
 
-  // Load .claude/skills first (lower priority: 50)
-  if (existsSync(opts.claudeSkillsPath)) {
-    const claudeSkills = await loadFromDirectory(opts.claudeSkillsPath, 50);
-    for (const skill of claudeSkills) {
+  // Legacy compatibility with historical ~/.claude/skills location (lowest priority)
+  if (opts.legacyClaudeSkillsPath && existsSync(opts.legacyClaudeSkillsPath)) {
+    const legacySkills = await loadFromDirectory(opts.legacyClaudeSkillsPath, 40);
+    for (const skill of legacySkills) {
       skills.set(skill.name, skill);
     }
   }
 
-  // Load .agents/skills (higher priority: 100, overrides claude)
-  if (existsSync(opts.agentsSkillsPath)) {
-    const agentsSkills = await loadFromDirectory(opts.agentsSkillsPath, 100);
+  // Load ~/.xz/skills
+  if (existsSync(opts.xzSkillsPath)) {
+    const xzSkills = await loadFromDirectory(opts.xzSkillsPath, 60);
+    for (const skill of xzSkills) {
+      skills.set(skill.name, skill);
+    }
+  }
+
+  // Load ~/.agents/skills
+  if (existsSync(opts.homeAgentsSkillsPath)) {
+    const agentsHomeSkills = await loadFromDirectory(opts.homeAgentsSkillsPath, 80);
+    for (const skill of agentsHomeSkills) {
+      skills.set(skill.name, skill);
+    }
+  }
+
+  // Load project-local .agents/skills (highest priority)
+  if (existsSync(opts.projectAgentsSkillsPath)) {
+    const agentsSkills = await loadFromDirectory(opts.projectAgentsSkillsPath, 100);
     for (const skill of agentsSkills) {
       skills.set(skill.name, skill);
     }

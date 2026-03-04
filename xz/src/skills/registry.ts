@@ -61,12 +61,48 @@ export class SimpleSkillRegistry implements SkillRegistry {
       return '';
     }
 
-    return skills.map(s => `
-## ${s.name}
-${s.description}
-${s.argumentHint ? `Usage: ${s.name} ${s.argumentHint}` : ''}
-${s.content}
-`).join('\n---\n');
+    const availableSkills = [
+      '<available_skills>',
+      ...skills.map((skill) => {
+        const location =
+          skill.source !== 'builtin' && skill.source.trim().length > 0
+            ? `\n    <location>${this.xmlEscape(skill.source)}</location>`
+            : '';
+        const argumentHint = skill.argumentHint
+          ? `\n    <argument_hint>${this.xmlEscape(skill.argumentHint)}</argument_hint>`
+          : '';
+        const disableModelInvocation = skill.disableModelInvocation
+          ? '\n    <disable_model_invocation>true</disable_model_invocation>'
+          : '';
+
+        return (
+          '  <skill>\n' +
+          `    <name>${this.xmlEscape(skill.name)}</name>\n` +
+          `    <description>${this.xmlEscape(skill.description)}</description>` +
+          argumentHint +
+          disableModelInvocation +
+          location +
+          '\n  </skill>'
+        );
+      }),
+      '</available_skills>',
+    ].join('\n');
+
+    return (
+      `${availableSkills}\n\n` +
+      'Only skill catalog entries are preloaded.\n' +
+      'If you need full instructions for a skill, call tool `load_skill` with the exact skill name.\n' +
+      'After loading, follow that skill content.'
+    );
+  }
+
+  private xmlEscape(value: string): string {
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
   }
 }
 

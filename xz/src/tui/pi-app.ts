@@ -213,9 +213,10 @@ export class PiTUIApp {
 
   getContextUsage(): ContextUsage {
     const maxTokens = Math.max(this.config.context.maxTokens, 1);
-    // Calculate tokens for all messages that would be sent to agent
-    // (agent uses limit: 50, but we calculate based on actual token usage)
-    const usedTokens = this.messages.reduce((sum, msg) => sum + this.estimateTokens(msg.content), 0);
+    const usedTokens =
+      this.mode === 'normal' && this.agent
+        ? this.agent.getContextStats().usedTokens
+        : this.messages.reduce((sum, msg) => sum + this.estimateTokens(msg.content), 0);
     const leftPercent = Math.max(0, Math.min(100, Math.round((1 - usedTokens / maxTokens) * 100)));
 
     return { usedTokens, maxTokens, leftPercent };
@@ -255,11 +256,48 @@ export class PiTUIApp {
       return;
     }
 
+    if (this.mode === 'normal' && this.agent?.isRunning()) {
+      return;
+    }
+
+    if (this.mode === 'init' && this.initAgent?.isRunning()) {
+      return;
+    }
+
     const submitted = this.inputValue;
     this.inputValue = '';
     this.emit();
 
     await this.handleSubmit(submitted);
+  }
+
+  interruptCurrentRun(): boolean {
+    let interrupted = false;
+
+    if (this.mode === 'normal') {
+      interrupted = this.agent?.cancelCurrentRun() ?? false;
+      this.setBusy(false);
+    } else {
+      interrupted = this.initAgent?.abortCurrentRun() ?? false;
+    }
+
+    if (!interrupted) {
+      return false;
+    }
+
+    if (this.streamingAssistantMessage && this.streamingAssistantMessage.content.trim().length === 0) {
+      const emptyMessage = this.streamingAssistantMessage;
+      this.messages = this.messages.filter((message) => message !== emptyMessage);
+    }
+
+    this.isProcessing = false;
+    this.streamActive = false;
+    this.awaitingFinalAssistantMessage = false;
+    this.thinkingPreview = '';
+    this.streamingAssistantMessage = null;
+
+    this.addMessage('system', 'Interrupted');
+    return true;
   }
 
   private emit(): void {
@@ -286,11 +324,13 @@ export class PiTUIApp {
   private loadRecentHistory(): void {
     if (!this.agent) return;
     const recent = getRecentMessages(this.agent.getSessionId(), PiTUIApp.HISTORY_LIMIT);
-    this.messages = recent.map((msg) => ({
-      role: msg.role,
-      content: msg.content,
-      timestamp: msg.createdAt,
-    }));
+    this.messages = recent
+      .filter((msg) => msg.role !== 'tool' && msg.content.trim().length > 0)
+      .map((msg) => ({
+        role: msg.role,
+        content: msg.content,
+        timestamp: msg.createdAt,
+      }));
   }
 
   private async handleSubmit(input: string): Promise<void> {
@@ -805,6 +845,11 @@ function InkTUIRoot({ app }: InkTUIRootProps): React.ReactElement {
     }
 
     if (key.escape) {
+      if (snapshot.isProcessing) {
+        app.interruptCurrentRun();
+        return;
+      }
+
       app.clearInput();
       return;
     }

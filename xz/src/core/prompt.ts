@@ -87,8 +87,7 @@ export async function buildSystemPrompt(
         "- Any information not in the pre-loaded context above\n\n" +
         "**You MUST use tool calls:**\n" +
         "1. Call `memory_search` with relevant keywords to find matching chunks\n" +
-        "2. If needed, call `memory_get` with `file`, `start_line`, `end_line` to read full content\n" +
-        "3. Use the retrieved information to answer accurately\n\n" +
+        "2. Use the retrieved information to answer accurately\n\n" +
         "**If after searching you still have low confidence:**\n" +
         "- Explicitly state that you checked the memory but could not find the information\n" +
         "- Do not make up or hallucinate information\n\n" +
