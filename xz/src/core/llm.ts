@@ -53,6 +53,12 @@ export interface LLMStreamHandlers {
   onReasoning?: (delta: string) => void;
 }
 
+const CONNECTION_ERROR_MAX_RETRIES = 5;
+const CONNECTION_RETRY_BASE_DELAY_MS = 500;
+const RETRYABLE_CONNECTION_STATUS_CODES = new Set([408, 502, 503, 504]);
+const CONNECTION_ERROR_PATTERN =
+  /(connection error|network error|fetch failed|failed to fetch|socket hang up|timed out|timeout|econn|enotfound|ehostunreach|upstream connect|connection refused|temporary failure)/i;
+
 /**
  * LLM client
  */
@@ -75,12 +81,12 @@ export class LLMClient {
     const url = `${this.baseUrl}/chat/completions`;
     const body = this.buildRequestBody(messages, options);
     const headers = await this.buildHeaders();
-    const response = await fetch(url, {
+    const response = await this.fetchWithConnectionRetry(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
       signal: options.signal,
-    });
+    }, options.signal);
 
     if (!response.ok) {
       const error = await response.text();
@@ -123,12 +129,12 @@ export class LLMClient {
       },
     };
 
-    const response = await fetch(url, {
+    const response = await this.fetchWithConnectionRetry(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
       signal: options.signal,
-    });
+    }, options.signal);
 
     if (!response.ok) {
       const error = await response.text();
@@ -286,6 +292,138 @@ export class LLMClient {
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       usage,
     };
+  }
+
+  private async fetchWithConnectionRetry(
+    url: string,
+    init: RequestInit,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    let retriesRemaining = CONNECTION_ERROR_MAX_RETRIES;
+
+    while (true) {
+      if (signal?.aborted) {
+        throw this.createAbortError();
+      }
+
+      let response: Response;
+      try {
+        response = await fetch(url, init);
+      } catch (error) {
+        if (
+          this.isAbortError(error) ||
+          retriesRemaining <= 0 ||
+          !this.isConnectionError(error)
+        ) {
+          throw error;
+        }
+
+        retriesRemaining -= 1;
+        await this.waitBeforeConnectionRetry(retriesRemaining, signal);
+        continue;
+      }
+
+      if (!response.ok) {
+        const errorText = await response.clone().text();
+        if (
+          retriesRemaining > 0 &&
+          this.isRetryableConnectionResponse(response.status, errorText)
+        ) {
+          retriesRemaining -= 1;
+          await this.waitBeforeConnectionRetry(retriesRemaining, signal);
+          continue;
+        }
+      }
+
+      return response;
+    }
+  }
+
+  private isRetryableConnectionResponse(status: number, errorText: string): boolean {
+    return RETRYABLE_CONNECTION_STATUS_CODES.has(status) || this.isConnectionErrorText(errorText);
+  }
+
+  private isConnectionError(error: unknown): boolean {
+    if (!(error instanceof Error)) {
+      return false;
+    }
+    if (this.isAbortError(error)) {
+      return false;
+    }
+
+    const baseMessage = error.message || '';
+    if (this.isConnectionErrorText(baseMessage)) {
+      return true;
+    }
+
+    const cause = (error as { cause?: unknown }).cause;
+    if (cause instanceof Error && this.isConnectionErrorText(cause.message || '')) {
+      return true;
+    }
+
+    const code = this.extractErrorCode(cause);
+    return code !== null && /ECONN|ENOTFOUND|EHOSTUNREACH|ETIMEDOUT|EAI_AGAIN|ECONNRESET/i.test(code);
+  }
+
+  private extractErrorCode(value: unknown): string | null {
+    if (typeof value !== 'object' || value === null) {
+      return null;
+    }
+
+    const record = value as { code?: unknown };
+    return typeof record.code === 'string' ? record.code : null;
+  }
+
+  private isConnectionErrorText(value: string): boolean {
+    return CONNECTION_ERROR_PATTERN.test(value.trim());
+  }
+
+  private async waitBeforeConnectionRetry(
+    retriesRemaining: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (signal?.aborted) {
+      throw this.createAbortError();
+    }
+
+    const attempt = CONNECTION_ERROR_MAX_RETRIES - retriesRemaining;
+    const delayMs = Math.min(CONNECTION_RETRY_BASE_DELAY_MS * attempt, 2500);
+    if (delayMs <= 0) {
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, delayMs);
+
+      const onAbort = () => {
+        cleanup();
+        reject(this.createAbortError());
+      };
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+      };
+
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  private isAbortError(error: unknown): boolean {
+    return error instanceof Error && error.name === 'AbortError';
+  }
+
+  private createAbortError(): Error {
+    if (typeof DOMException === 'function') {
+      return new DOMException('Request was aborted', 'AbortError');
+    }
+
+    const error = new Error('Request was aborted');
+    error.name = 'AbortError';
+    return error;
   }
 
   private buildRequestBody(messages: Message[], options: LLMOptions): Record<string, unknown> {

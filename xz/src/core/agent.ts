@@ -31,6 +31,10 @@ const DEFAULT_ERROR_REPLY =
   "Sorry, I encountered an error processing your request.";
 const WAKEUP_ERROR_REPLY = "Failed to process scheduled task.";
 const CONTEXT_WINDOW_MESSAGES = 50;
+const CONNECTION_ERROR_MAX_RETRIES = 5;
+const CONNECTION_RETRY_BASE_DELAY_MS = 500;
+const CONNECTION_ERROR_PATTERN =
+  /(connection error|network error|fetch failed|failed to fetch|socket hang up|timed out|timeout|econn|enotfound|ehostunreach|upstream connect|connection refused|temporary failure)/i;
 
 const EMPTY_USAGE = {
   input: 0,
@@ -97,6 +101,8 @@ export class Agent {
   private isAssistantStreamOpen = false;
   private suppressNextUserMessage = false;
   private abortRequested = false;
+  private connectionRetriesRemaining = 0;
+  private connectionRetryLoopActive = false;
 
   constructor(options: AgentOptions = {}) {
     this.config = loadConfig();
@@ -298,14 +304,46 @@ export class Agent {
     await this.refreshSystemPromptIfSourcesChanged();
     this.abortRequested = false;
     this.suppressNextUserMessage = suppressUserMessage;
+    this.connectionRetriesRemaining = CONNECTION_ERROR_MAX_RETRIES;
+    this.connectionRetryLoopActive = true;
+    let continueFromCurrentState = false;
 
     try {
-      await this.core.prompt(content);
+      while (true) {
+        if (continueFromCurrentState) {
+          await this.core.continue();
+        } else {
+          await this.core.prompt(content);
+        }
+
+        if (this.abortRequested) {
+          return;
+        }
+
+        const errorMessage = this.getCoreErrorMessage();
+        if (
+          !errorMessage ||
+          !this.isConnectionErrorMessage(errorMessage) ||
+          this.connectionRetriesRemaining <= 0
+        ) {
+          break;
+        }
+
+        if (!this.pruneTrailingConnectionErrorMarker()) {
+          break;
+        }
+
+        this.connectionRetriesRemaining -= 1;
+        continueFromCurrentState = true;
+        await this.waitBeforeConnectionRetry();
+      }
     } catch (error) {
       console.error("LLM error:", error);
       this.closeAssistantStreamIfNeeded();
       this.saveMessage("assistant", errorReply);
     } finally {
+      this.connectionRetryLoopActive = false;
+      this.connectionRetriesRemaining = 0;
       this.suppressNextUserMessage = false;
     }
   }
@@ -357,6 +395,9 @@ export class Agent {
 
           const payload = this.extractAssistantPayload(event.message);
           if (payload) {
+            if (this.shouldSuppressRetryableConnectionError(event.message)) {
+              return;
+            }
             this.saveMessage("assistant", payload.content, {
               toolCalls: payload.toolCalls,
               emit: payload.content.trim().length > 0,
@@ -440,6 +481,105 @@ export class Agent {
 
     messages.pop();
     this.core.replaceMessages(messages);
+  }
+
+  private shouldSuppressRetryableConnectionError(message: AgentMessage): boolean {
+    if (
+      !this.connectionRetryLoopActive ||
+      this.connectionRetriesRemaining <= 0 ||
+      this.abortRequested
+    ) {
+      return false;
+    }
+
+    const assistantMessage = message as {
+      role?: unknown;
+      stopReason?: unknown;
+      errorMessage?: unknown;
+      content?: unknown;
+    };
+    if (assistantMessage.role !== "assistant") {
+      return false;
+    }
+
+    const stopReason =
+      typeof assistantMessage.stopReason === "string"
+        ? assistantMessage.stopReason
+        : "";
+    const errorMessage =
+      typeof assistantMessage.errorMessage === "string"
+        ? assistantMessage.errorMessage
+        : "";
+    const text = this.extractTextForTokenEstimate(assistantMessage.content).trim();
+
+    return (
+      stopReason === "error" &&
+      text.length === 0 &&
+      this.isConnectionErrorMessage(errorMessage)
+    );
+  }
+
+  private pruneTrailingConnectionErrorMarker(): boolean {
+    const messages = [...this.core.state.messages];
+    const last = messages[messages.length - 1] as
+      | {
+          role?: unknown;
+          stopReason?: unknown;
+          errorMessage?: unknown;
+          content?: unknown;
+        }
+      | undefined;
+
+    if (!last || last.role !== "assistant") {
+      return false;
+    }
+
+    const stopReason =
+      typeof last.stopReason === "string" ? last.stopReason : "";
+    const errorMessage =
+      typeof last.errorMessage === "string" ? last.errorMessage : "";
+    const text = this.extractTextForTokenEstimate(last.content).trim();
+
+    if (
+      stopReason !== "error" ||
+      text.length > 0 ||
+      !this.isConnectionErrorMessage(errorMessage)
+    ) {
+      return false;
+    }
+
+    messages.pop();
+    this.core.replaceMessages(messages);
+    return true;
+  }
+
+  private getCoreErrorMessage(): string | null {
+    const state = this.core.state as { error?: unknown };
+    if (typeof state.error !== "string" || state.error.trim().length === 0) {
+      return null;
+    }
+    return state.error;
+  }
+
+  private isConnectionErrorMessage(message: string): boolean {
+    return CONNECTION_ERROR_PATTERN.test(message.trim());
+  }
+
+  private async waitBeforeConnectionRetry(): Promise<void> {
+    if (this.abortRequested) {
+      return;
+    }
+
+    const attempt =
+      CONNECTION_ERROR_MAX_RETRIES - this.connectionRetriesRemaining;
+    const delayMs = Math.min(CONNECTION_RETRY_BASE_DELAY_MS * attempt, 2500);
+    if (delayMs <= 0) {
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, delayMs);
+    });
   }
 
   private extractUserContent(message: AgentMessage): string {
