@@ -51,6 +51,17 @@ program.addCommand(createSkillCommand());
 // Heartbeat commands
 program.addCommand(createHeartbeatCommand());
 
+// Web Server command
+program
+  .command('server')
+  .description('Start web server with browser-based chat interface')
+  .option('-p, --port <port>', 'Server port', '3000')
+  .action(async (options) => {
+    const { XZServer } = await import('../server/server.js');
+    const server = new XZServer();
+    await server.start(parseInt(options.port));
+  });
+
 /**
  * Main entry point
  */

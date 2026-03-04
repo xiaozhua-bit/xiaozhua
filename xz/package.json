@@ -18,15 +18,19 @@
     "cli:tui": "jiti src/cli/run.ts",
     "cli:memory": "jiti src/cli/run.ts memory",
     "cli:history": "jiti src/cli/run.ts history",
-    "cli:debug": "DEBUG=xz jiti src/cli/run.ts"
+    "cli:debug": "DEBUG=xz jiti src/cli/run.ts",
+    "server": "jiti src/server/server.ts"
   },
   "dependencies": {
     "@clack/prompts": "^1.0.1",
+    "@fastify/static": "^7.0.0",
+    "@fastify/websocket": "^10.0.0",
     "@iarna/toml": "^2.2.5",
     "@mariozechner/pi-agent-core": "^0.55.4",
     "@mariozechner/pi-tui": "^0.55.4",
     "better-sqlite3": "^12.6.2",
     "commander": "^12.1.0",
+    "fastify": "^4.26.0",
     "ink": "^6.8.0",
     "ink-text-input": "^6.0.0",
     "picocolors": "^1.1.1",
@@ -37,8 +41,10 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.11.0",
     "@types/react": "^19.2.14",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.3.3",
-    "vitest": "^1.3.0"
+    "vitest": "^1.3.0",
+    "ws": "^8.19.0"
   },
   "engines": {
     "node": ">=18.0.0"

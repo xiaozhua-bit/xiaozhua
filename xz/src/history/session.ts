@@ -95,8 +95,31 @@ export function listSessions(options: ListSessionsOptions = {}): PaginatedSessio
 
   const page = Math.floor(offset / limit) + 1;
 
+  // Enrich sessions with titles if missing
+  const sessions = rows.map(row => {
+    const session = rowToSession(row);
+    if (!session.title) {
+      // Try to get first user message as title
+      const firstMessage = db.prepare(`
+        SELECT content FROM messages 
+        WHERE session_id = ? AND role = 'user' 
+        ORDER BY created_at ASC 
+        LIMIT 1
+      `).get(session.id) as { content: string } | undefined;
+      
+      if (firstMessage) {
+        // Use first 30 chars of first user message
+        session.title = firstMessage.content.slice(0, 30) + (firstMessage.content.length > 30 ? '...' : '');
+      } else {
+        // Fallback to session ID prefix
+        session.title = `会话 ${session.id.slice(-8)}`;
+      }
+    }
+    return session;
+  });
+
   return {
-    sessions: rows.map(rowToSession),
+    sessions,
     total,
     page,
     perPage: limit,

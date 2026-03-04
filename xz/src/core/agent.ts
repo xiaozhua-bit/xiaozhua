@@ -952,6 +952,7 @@ export class Agent {
   private buildInitialMessages(model: RuntimeModel): AgentMessage[] {
     const messages = getRecentMessages(this.sessionId, CONTEXT_WINDOW_MESSAGES);
     const out: AgentMessage[] = [];
+    const pendingToolCalls: Array<{ id: string; name: string }> = [];
 
     for (const message of messages) {
       if (message.role === "user") {
@@ -975,17 +976,24 @@ export class Agent {
           content.push({ type: "text", text: message.content });
         }
 
-        for (const toolCall of message.toolCalls ?? []) {
-          if (!toolCall.function?.name) {
+        for (const [index, toolCall] of (message.toolCalls ?? []).entries()) {
+          const toolName = toolCall.function?.name?.trim();
+          if (!toolName) {
             continue;
           }
 
+          const toolCallId =
+            typeof toolCall.id === "string" && toolCall.id.trim().length > 0
+              ? toolCall.id.trim()
+              : `hist_${message.id}_${index}`;
+
           content.push({
             type: "toolCall",
-            id: toolCall.id,
-            name: toolCall.function.name,
+            id: toolCallId,
+            name: toolName,
             arguments: this.parseToolArguments(toolCall.function.arguments),
           });
+          pendingToolCalls.push({ id: toolCallId, name: toolName });
         }
 
         if (content.length === 0) {
@@ -1004,16 +1012,13 @@ export class Agent {
         } as AgentMessage);
       } else if (message.role === "tool") {
         const metadata = this.asRecord(message.metadata);
-        const toolCallId =
-          typeof metadata.toolCallId === "string" &&
-          metadata.toolCallId.trim().length > 0
-            ? metadata.toolCallId
-            : message.id;
-        const toolName =
-          typeof metadata.toolName === "string" &&
-          metadata.toolName.trim().length > 0
-            ? metadata.toolName
-            : "tool";
+        const link = this.resolveHistoryToolResultLink(
+          metadata,
+          pendingToolCalls,
+        );
+        if (!link) {
+          continue;
+        }
         const isError = metadata.isError === true;
         const details = Object.prototype.hasOwnProperty.call(
           metadata,
@@ -1024,8 +1029,8 @@ export class Agent {
 
         out.push({
           role: "toolResult",
-          toolCallId,
-          toolName,
+          toolCallId: link.toolCallId,
+          toolName: link.toolName,
           content: [{ type: "text", text: message.content }],
           details,
           isError,
@@ -1035,6 +1040,47 @@ export class Agent {
     }
 
     return out;
+  }
+
+  private resolveHistoryToolResultLink(
+    metadata: Record<string, unknown>,
+    pendingToolCalls: Array<{ id: string; name: string }>,
+  ): { toolCallId: string; toolName: string } | null {
+    if (pendingToolCalls.length === 0) {
+      return null;
+    }
+
+    const metadataToolCallId =
+      typeof metadata.toolCallId === "string" ? metadata.toolCallId.trim() : "";
+    const metadataToolName =
+      typeof metadata.toolName === "string" ? metadata.toolName.trim() : "";
+
+    if (metadataToolCallId.length > 0) {
+      const exactIndex = pendingToolCalls.findIndex(
+        (call) => call.id === metadataToolCallId,
+      );
+      if (exactIndex >= 0) {
+        const [match] = pendingToolCalls.splice(exactIndex, 1);
+        return {
+          toolCallId: match.id,
+          toolName: metadataToolName || match.name || "tool",
+        };
+      }
+    }
+
+    const inferredIndex = metadataToolName
+      ? pendingToolCalls.findIndex((call) => call.name === metadataToolName)
+      : 0;
+    const fallbackIndex = inferredIndex >= 0 ? inferredIndex : 0;
+    const [fallback] = pendingToolCalls.splice(fallbackIndex, 1);
+    if (!fallback) {
+      return null;
+    }
+
+    return {
+      toolCallId: fallback.id,
+      toolName: metadataToolName || fallback.name || "tool",
+    };
   }
 
   private stringifyToolArguments(argumentsValue: unknown): string {
