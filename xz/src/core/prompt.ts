@@ -53,49 +53,38 @@ export async function buildSystemPrompt(
   if (docs.memory) {
     parts.push(
       "# Memory\n\n" +
-        `> **Source**: \`${memoryPath}\`\n` +
+        `> **Source**: \`${memoryPath}\` and \`${join(xzHome, "memory/*.md")}\`\n` +
         "> **Definition**: This is your persistent memory store containing key facts and knowledge.\n" +
         "> **Requirement**: Use this information to maintain context and consistency across conversations.\n" +
         "> **Confidentiality**: Treat sensitive information in this document as private.\n\n" +
+        "## Memory Storage\n\n" +
+        "Memory is stored in chunks with the following fields:\n" +
+        '- `file`: File path (e.g., "MEMORY.md", "memory/2024-01-15.md")\n' +
+        "- `line_start`, `line_end`: Line numbers (1-based, inclusive)\n" +
+        "- `content`: The actual text content\n" +
+        "- `tags`: Optional tags for categorization\n\n" +
+        "Use `edit_file` tool to add/update memory content in markdown files.\n\n" +
+        "## Memory Retrieval Protocol\n\n" +
+        "**BEFORE answering any question about:**\n" +
+        "- Prior work, decisions, or discussions\n" +
+        "- Dates, events, or timelines\n" +
+        "- People, preferences, or todos\n" +
+        "- Any information not in the pre-loaded context above\n\n" +
+        "**You MUST use tool calls:**\n" +
+        "1. Call `memory_search` with relevant keywords to find matching chunks\n" +
+        "2. If needed, call `memory_get` with `file`, `start_line`, `end_line` to read full content\n" +
+        "3. Use the retrieved information to answer accurately\n\n" +
+        "**If after searching you still have low confidence:**\n" +
+        "- Explicitly state that you checked the memory but could not find the information\n" +
+        "- Do not make up or hallucinate information\n\n" +
         docs.memory,
     );
   }
-
-  // Tools/Skills section
-  parts.push(`
-# Available Tools
-
-You have access to the following tools via function calling:
-
-- **bash**: Execute bash commands
-- **memory_search**: Search knowledge memory
-- **edit_file**: Edit files with exact text replacement
-- **schedule_task**: Schedule future tasks
-- **update_config**: Update agent configuration
-
-You also have access to the xz CLI for retrieval:
-- xz memory search <query> [--page N]
-- xz memory get <file> [--start-line N] [--end-line N]
-- xz history search <query> [--page N]
-- xz history session <id> [--offset N]
-
-Use these when you need information not in the pre-loaded context.
-`);
 
   // Skills
   if (context.skills) {
     parts.push("# Skills\n\n" + context.skills);
   }
-
-  // Instructions
-  parts.push(`
-# Instructions
-
-- Be helpful, accurate, and efficient
-- Use tools when needed to accomplish tasks
-- Search memory when user references past information
-- You are xz, an AI agent with persistent memory
-`);
 
   return parts.join("\n\n---\n\n");
 }

@@ -485,17 +485,17 @@ export class Agent {
       {
         name: 'memory_search',
         label: 'Memory Search',
-        description: 'Search knowledge memory for facts and information',
+        description: 'Search knowledge memory for facts and information using FTS5 BM25 ranking',
         parameters: {
           type: 'object',
           properties: {
             query: {
               type: 'string',
-              description: 'Search query',
+              description: 'Search query - use keywords or phrases to find relevant memories',
             },
             limit: {
               type: 'number',
-              description: 'Max results',
+              description: 'Max results to return (default: 5)',
               default: 5,
             },
           },
@@ -504,6 +504,38 @@ export class Agent {
         execute: async (_toolCallId, args) => {
           this.onToolCall?.('memory_search', args);
           const result = await this.executeMemorySearch(String(args.query ?? ''), Number(args.limit ?? 5));
+          return this.toolText(result);
+        },
+      },
+      {
+        name: 'memory_get',
+        label: 'Memory Get',
+        description: 'Retrieve specific content from a memory file by line range',
+        parameters: {
+          type: 'object',
+          properties: {
+            file: {
+              type: 'string',
+              description: 'Memory file path (e.g., "MEMORY.md" or "memory/2024-01-15.md")',
+            },
+            start_line: {
+              type: 'number',
+              description: 'Start line number (1-based, inclusive)',
+            },
+            end_line: {
+              type: 'number',
+              description: 'End line number (inclusive). If omitted, returns from start_line to end of file',
+            },
+          },
+          required: ['file', 'start_line'],
+        } as any,
+        execute: async (_toolCallId, args) => {
+          this.onToolCall?.('memory_get', args);
+          const result = await this.executeMemoryGet(
+            String(args.file ?? ''),
+            Number(args.start_line ?? 1),
+            args.end_line !== undefined ? Number(args.end_line) : undefined,
+          );
           return this.toolText(result);
         },
       },
@@ -643,6 +675,20 @@ export class Agent {
     return results.items
       .map((r, i) => `${i + 1}. ${r.chunk.file}:${r.chunk.lineStart}-${r.chunk.lineEnd}: ${r.chunk.content.slice(0, 100)}`)
       .join('\n');
+  }
+
+  /**
+   * Execute memory get - retrieve specific file content by line range
+   */
+  private async executeMemoryGet(file: string, startLine: number, endLine?: number): Promise<string> {
+    const { getFileContent } = await import('../knowledge/index.js');
+    const content = getFileContent(file, { startLine, endLine });
+
+    if (content === null) {
+      return `File not found or no content in range: ${file}`;
+    }
+
+    return content;
   }
 
   /**
